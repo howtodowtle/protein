@@ -1,12 +1,15 @@
-// Regression tests for the offline queue state machine in index.html.
+// Regression tests for the offline queue and the day log in index.html.
 // Zero dependencies: `node test/queue.test.js`. Runs the real inline script
 // under a minimal DOM shim rather than re-implementing it.
 const fs = require("fs");
 const vm = require("vm");
 
+// The focused element, shared the way document.activeElement is in a browser.
+let activeElement = null;
+
 function makeEl(id) {
   const el = {
-    id, textContent: "", innerHTML: "", value: "", placeholder: "", title: "",
+    id, textContent: "", value: "", placeholder: "", title: "",
     disabled: false, type: "", href: "",
     style: new Proxy({}, { get: (t, k) => t[k] || "", set: (t, k, v) => (t[k] = v, true) }),
     children: [],
@@ -20,20 +23,39 @@ function makeEl(id) {
     listeners: {},
     addEventListener(t, f) { (this.listeners[t] ||= []).push(f); },
     appendChild(c) { this.children.push(c); return c; },
-    setAttribute() {}, focus() {}, select() {},
+    setAttribute() {}, select() {},
+    selectionStart: null,
+    setSelectionRange(start) { this.selectionStart = start; },
+    focus() { activeElement = this; },
+    contains(n) { return n === this || this.children.some((c) => c.contains(n)); },
     click() { (this.listeners.click || []).forEach((f) => f()); },
+    // Clearing innerHTML must really empty the node: the app rebuilds its lists
+    // that way, and a shim that kept stale children would hide render bugs.
+    get innerHTML() { return this._html || ""; },
+    set innerHTML(v) {
+      this._html = v;
+      if (v) return;
+      // Detaching the focused element blurs it and drops its selection.
+      if (activeElement && this.contains(activeElement)) {
+        activeElement.selectionStart = null;
+        activeElement = null;
+      }
+      this.children.length = 0;
+    },
   };
   return el;
 }
 
 function makeHarness({ fetchImpl, online = true, store = {} }) {
   const els = {};
+  activeElement = null;
   const document = {
     getElementById: (id) => (els[id] ||= makeEl(id)),
     createElement: (tag) => makeEl("<" + tag + ">"),
     addEventListener(t, f) { (this.listeners[t] ||= []).push(f); },
     listeners: {},
     hidden: false,
+    get activeElement() { return activeElement; },
   };
   const localStorage = {
     getItem: (k) => (k in store ? store[k] : null),
@@ -271,6 +293,82 @@ const baseStore = () => ({ "protein.apiKey": "sk-test", "protein.provider": "ant
     await settle();
     check("still empty", q(h).length === 0, q(h));
     check("no day entry written", Object.keys(days(h)).length === 0, days(h));
+  }
+
+  // ---- 11. correcting a logged item edits it in place
+  {
+    console.log("11. edit a logged item");
+    const h = makeHarness({ store: baseStore(), fetchImpl: async () => ok([{ name: "Eggs", amount: "4", protein_g: 25 }]) });
+    h.els["food-input"].value = "4 eggs";
+    h.els["log-btn"].click();
+    await settle();
+    const before = Object.values(days(h))[0][0];
+
+    h.ctx.startEdit(before.id);
+    const li = h.els["items"].children[0];
+    const [name, row] = li.children;
+    const [amount, grams, save] = row.children;
+    check("fields prefilled from the item", name.value === "Eggs" && grams.value === 25, [name.value, grams.value]);
+
+    name.value = "  Fried eggs  ";
+    amount.value = "4 large";
+    grams.value = "31.6";
+    save.click();
+
+    const after = Object.values(days(h))[0][0];
+    check("name trimmed and saved", after.name === "Fried eggs", after);
+    check("amount saved", after.amount === "4 large", after);
+    check("protein rounded to an integer", after.protein === 32, after);
+    check("id preserved", after.id === before.id, [before.id, after.id]);
+    check("still one item", Object.values(days(h))[0].length === 1, days(h));
+    check("edit mode closed", h.ctx.editingId === null, h.ctx.editingId);
+  }
+
+  // ---- 12. an empty name is refused, and cancel discards the draft
+  {
+    console.log("12. edit guards");
+    const h = makeHarness({ store: baseStore(), fetchImpl: async () => ok([{ name: "Quark", amount: "200 g", protein_g: 19 }]) });
+    h.els["food-input"].value = "200g quark";
+    h.els["log-btn"].click();
+    await settle();
+    const id = Object.values(days(h))[0][0].id;
+
+    h.ctx.startEdit(id);
+    let [name, row] = h.els["items"].children[0].children;
+    name.value = "   ";
+    row.children[2].click();
+    check("blank name not saved", Object.values(days(h))[0][0].name === "Quark", days(h));
+    check("still editing", h.ctx.editingId === id, h.ctx.editingId);
+
+    // cancel: the typed draft is thrown away, the stored item is untouched
+    [name, row] = h.els["items"].children[0].children;
+    name.value = "Skyr";
+    row.children[3].click();
+    check("cancel discards the draft", Object.values(days(h))[0][0].name === "Quark", days(h));
+    check("edit mode closed", h.ctx.editingId === null, h.ctx.editingId);
+  }
+
+  // ---- 13. a background render mid-edit keeps the draft and the caret
+  {
+    console.log("13. render while editing");
+    const h = makeHarness({ store: baseStore(), fetchImpl: async () => ok([{ name: "Eggs", amount: "4", protein_g: 25 }]) });
+    h.els["food-input"].value = "4 eggs";
+    h.els["log-btn"].click();
+    await settle();
+
+    h.ctx.startEdit(Object.values(days(h))[0][0].id);
+    const li = h.els["items"].children[0];
+    const name = li.children[0];
+    check("name field focused on open", h.document.activeElement === name, h.document.activeElement);
+    name.value = "half-typed";
+    name.selectionStart = 4;
+
+    h.ctx.render(); // stands in for a queue drain or an online event
+    const after = h.els["items"].children[0];
+    check("same node re-attached", after === li, after && after.className);
+    check("draft text kept", after.children[0].value === "half-typed", after.children[0].value);
+    check("focus restored", h.document.activeElement === name, h.document.activeElement && h.document.activeElement.className);
+    check("caret restored", name.selectionStart === 4, name.selectionStart);
   }
 
   console.log("\n" + pass + " passed, " + fail + " failed");

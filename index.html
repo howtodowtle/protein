@@ -51,12 +51,15 @@
   .settings-row { display: flex; gap: 8px; margin-top: 10px; }
   .field-col { flex: 1; min-width: 0; }
   .field-col .field-label { margin-top: 0; margin-bottom: 4px; }
-  #api-key-input, #model-input, #provider-select, #thinking-select, #effort-input {
+  /* Every field in the app, settings or item edit, wears the same box. */
+  #api-key-input, #model-input, #provider-select, #thinking-select, #effort-input,
+  .edit-name, .edit-amount, .edit-grams {
     flex: 1; min-width: 0; border: 2px solid #111; padding: 8px 10px;
     font: inherit; font-size: 14px; background: #fff; color: #111; border-radius: 0;
   }
   #api-key-input:focus, #model-input:focus, #provider-select:focus,
-  #thinking-select:focus, #effort-input:focus {
+  #thinking-select:focus, #effort-input:focus,
+  .edit-name:focus, .edit-amount:focus, .edit-grams:focus {
     outline: 2px solid #111; outline-offset: 1px;
   }
   #thinking-select, #effort-input { width: 100%; }
@@ -148,13 +151,21 @@
   }
   .item-name { font-weight: 700; }
   .item-amount { margin-left: 8px; font-size: 14px; color: #6b6b6b; }
-  .item-left { padding-right: 12px; min-width: 0; }
+  .item-left { padding-right: 12px; min-width: 0; cursor: pointer; }
   .item-right { display: flex; align-items: baseline; gap: 12px; flex-shrink: 0; }
-  .item-grams { font-weight: 900; font-variant-numeric: tabular-nums; }
+  .item-grams, .edit-grams { font-weight: 900; font-variant-numeric: tabular-nums; }
+  .item-grams { cursor: pointer; }
   .item-del {
     background: none; border: none; cursor: pointer; font-size: 18px;
     line-height: 1; padding: 0 4px; color: #6b6b6b;
   }
+
+  /* Correcting an estimate: the row turns into its own fields, in place.
+     The fields wear the shared input box above; only the layout differs. */
+  #items li.editing { display: block; }
+  .edit-name { display: block; width: 100%; font-weight: 700; }
+  .edit-row { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+  .edit-grams { flex: none; width: 76px; text-align: right; }
 
   /* Week chart */
   .week-section { margin-top: 32px; }
@@ -250,6 +261,7 @@
     <div class="rule-4"></div>
     <p id="empty-msg">Nothing logged yet. Type what you ate.</p>
     <ul id="items"></ul>
+    <p id="items-hint" class="footnote">Tap an item to fix its name, amount or grams.</p>
   </section>
 
   <section class="week-section">
@@ -631,7 +643,8 @@ var effortOptions = $("effort-options");
 var totalEl = $("total"), goalShow = $("goal-show"), goalEdit = $("goal-edit"), goalInput = $("goal-input");
 var barFill = $("bar-fill"), goalMsg = $("goal-msg");
 var foodInput = $("food-input"), logBtn = $("log-btn"), errorEl = $("error");
-var itemsEl = $("items"), emptyMsg = $("empty-msg"), weekEl = $("week");
+var itemsEl = $("items"), emptyMsg = $("empty-msg"), itemsHint = $("items-hint");
+var weekEl = $("week");
 var pendingEl = $("pending"), offlineNote = $("offline-note");
 
 // ---------- rendering ----------
@@ -680,22 +693,45 @@ function render() {
   goalMsg.style.display = hit ? "block" : "none";
 
   // items
+  // Detaching a node blurs whatever was focused inside it, so note the caret
+  // before the list is cleared and put it back after the edit row is re-hung.
+  var focused = editNode && editNode.contains(document.activeElement) ? document.activeElement : null;
+  var caret = focused ? focused.selectionStart : null;
+
   itemsEl.innerHTML = "";
   emptyMsg.style.display = items.length ? "none" : "block";
+  itemsHint.style.display = items.length ? "block" : "none";
   items.forEach(function (it) {
+    // A row being edited is moved, not rebuilt: a background render (a queued
+    // entry draining, say) must not wipe out half-typed text or steal focus.
+    if (it.id === editingId) {
+      itemsEl.appendChild(editNode || (editNode = editRow(it)));
+      return;
+    }
+
     var left = el("div", "item-left");
     left.appendChild(el("span", "item-name", it.name));
     if (it.amount) left.appendChild(el("span", "item-amount", it.amount));
 
     var right = el("div", "item-right");
-    right.appendChild(el("span", "item-grams", it.protein + " g"));
+    var grams = el("span", "item-grams", it.protein + " g");
+    right.appendChild(grams);
     right.appendChild(delButton("item-del", "Remove " + it.name, function () { removeItem(it.id); }));
 
     var li = el("li");
     li.appendChild(left);
     li.appendChild(right);
+    var edit = function () { startEdit(it.id); };
+    left.addEventListener("click", edit);
+    grams.addEventListener("click", edit);
     itemsEl.appendChild(li);
   });
+
+  if (focused) {
+    focused.focus();
+    // Number inputs have no text selection; asking for one throws.
+    if (caret != null) try { focused.setSelectionRange(caret, caret); } catch (e) {}
+  }
 
   renderPending();
 
@@ -717,6 +753,64 @@ function render() {
     col.appendChild(el("span", "day-label" + (isToday ? " today" : ""), labels[d.getDay()]));
     weekEl.appendChild(col);
   }
+}
+
+// The row the user is correcting: its id, its live DOM node, and the field to
+// put the caret in. The node is held so render() can re-attach the same one
+// instead of building a fresh one over half-typed text.
+var editingId = null, editNode = null, editName = null;
+
+function editField(cls, type, value) {
+  var i = el("input", cls);
+  i.type = type;
+  i.value = value;
+  return i;
+}
+
+function editRow(it) {
+  var name = editField("edit-name", "text", it.name);
+  name.setAttribute("aria-label", "Name");
+  var amount = editField("edit-amount", "text", it.amount);
+  amount.placeholder = "amount";
+  amount.setAttribute("aria-label", "Amount");
+  var grams = editField("edit-grams", "number", it.protein);
+  grams.min = "0";
+  grams.setAttribute("inputmode", "numeric");
+  grams.setAttribute("aria-label", "Grams of protein");
+
+  var save = el("button", "btn-solid", "Save");
+  save.type = "button";
+  var cancel = el("button", "link-btn", "cancel");
+  cancel.type = "button";
+
+  function commit() {
+    var n = name.value.trim();
+    // An unnamed item would be unidentifiable in the list; keep the user here.
+    if (!n) { name.focus(); return; }
+    updateItem(it.id, {
+      name: n,
+      amount: amount.value.trim(),
+      protein: Math.max(0, Math.round(Number(grams.value) || 0))
+    });
+  }
+  save.addEventListener("click", commit);
+  cancel.addEventListener("click", stopEdit);
+
+  var row = el("div", "edit-row");
+  row.appendChild(amount);
+  row.appendChild(grams);
+  row.appendChild(save);
+  row.appendChild(cancel);
+
+  var li = el("li", "editing");
+  li.appendChild(name);
+  li.appendChild(row);
+  li.addEventListener("keydown", function (e) {
+    if (e.key === "Enter") { e.preventDefault(); commit(); }
+    else if (e.key === "Escape") stopEdit();
+  });
+  editName = name;
+  return li;
 }
 
 // Pending entries live outside the day totals: their protein is unknown until
@@ -766,6 +860,34 @@ function removeItem(id) {
   days[key] = (days[key] || []).filter(function (i) { return i.id !== id; });
   if (!saveDays(days)) showError(STORAGE_FAIL);
   render();
+}
+
+function startEdit(id) {
+  editingId = id;
+  editNode = editName = null; // a different row may have been open
+  render();                   // builds the row, and sets editName on the way
+  if (editName) editName.focus();
+}
+
+function stopEdit() {
+  editingId = null;
+  editNode = null;
+  editName = null;
+  render();
+}
+
+// The estimate is a guess; the user's correction is not. Edits are local only —
+// nothing is re-sent to the model.
+function updateItem(id, fields) {
+  var days = loadDays();
+  var key = todayKey();
+  days[key] = (days[key] || []).map(function (i) {
+    return i.id === id
+      ? { id: i.id, name: fields.name, amount: fields.amount, protein: fields.protein }
+      : i;
+  });
+  if (!saveDays(days)) showError(STORAGE_FAIL);
+  stopEdit();
 }
 
 // Enqueue first, then try to send. Not "send, and queue on failure" — this way

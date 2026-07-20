@@ -22,11 +22,30 @@
     font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
     background: #fff;
     color: #111;
+    /* 100vh on iOS is the tall viewport, measured as if the browser bars were
+       hidden, so it overflows by their height. dvh is the one actually on screen. */
     min-height: 100vh;
+    min-height: 100dvh;
     /* Keep clear of the notch and the home indicator when installed. */
     padding:
       env(safe-area-inset-top) env(safe-area-inset-right)
       env(safe-area-inset-bottom) env(safe-area-inset-left);
+    /* This is a phone app. Kill the double-tap zoom (and with it the 300ms wait
+       before a tap counts), the grey flash box, and the long-press selection
+       menu on rows that are themselves buttons. Pinch zoom still works. */
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
+    -webkit-touch-callout: none;
+    -webkit-user-select: none; user-select: none;
+  }
+  /* Form controls inherit neither the page font nor its size, and iOS zooms the
+     page in on any focused field under 16px — that zoom is what pushed the edit
+     row's cancel button off the screen. Set once, on the elements themselves, so
+     a field added later cannot quietly bring the bug back. Selection is turned
+     back on here too, the body above having turned it off everywhere. */
+  input, textarea, select {
+    font: inherit; font-size: 16px;
+    -webkit-user-select: text; user-select: text;
   }
   .wrap { max-width: 28rem; margin: 0 auto; padding: 0 20px 64px; }
 
@@ -43,19 +62,38 @@
     text-decoration: underline; text-underline-offset: 4px;
   }
 
+  /* Thumb targets. A 14px label is a ~19px tall target and the × glyphs are
+     barely wider; a thumb wants 44. The pad is an overlay, not padding, so a
+     target grows to size without a single pixel of the layout moving. Every
+     button gets one — naming them individually only invites the next button to
+     be forgotten. An overlay can only add to a hit area, never shrink it, so
+     the buttons already bigger than 44 are unaffected. */
+  button { position: relative; }
+  button::after {
+    content: ""; position: absolute; top: 50%; transform: translateY(-50%);
+    left: -8px; right: -8px; height: 44px;
+  }
+  /* With the tap flash gone, a press needs to say it landed. */
+  .btn-solid:active, #log-btn:active { opacity: 0.75; }
+  .link-btn:active, .item-left:active, .item-grams:active,
+  .item-del:active, .pend-del:active, .pend-retry:active { opacity: 0.5; }
+
   /* Settings */
   #settings { margin-top: 16px; border: 2px solid #111; padding: 14px; display: none; }
   #settings.open { display: block; }
   #settings h2 { font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.1em; }
   #settings p { font-size: 13px; color: #6b6b6b; margin-top: 6px; line-height: 1.4; }
-  .settings-row { display: flex; gap: 8px; margin-top: 10px; }
-  .field-col { flex: 1; min-width: 0; }
+  .settings-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+  /* Two fields sit side by side until the phone is too narrow for both to be
+     readable, then they stack. */
+  .field-col { flex: 1; min-width: 8rem; }
   .field-col .field-label { margin-top: 0; margin-bottom: 4px; }
-  /* Every field in the app, settings or item edit, wears the same box. */
+  /* Every field in the app, settings or item edit, wears the same box. The type
+     comes from the rule at the top; this is the box alone. */
   #api-key-input, #model-input, #provider-select, #thinking-select, #effort-input,
   .edit-name, .edit-amount, .edit-grams {
     flex: 1; min-width: 0; border: 2px solid #111; padding: 8px 10px;
-    font: inherit; font-size: 14px; background: #fff; color: #111; border-radius: 0;
+    background: #fff; color: #111; border-radius: 0;
   }
   #api-key-input:focus, #model-input:focus, #provider-select:focus,
   #thinking-select:focus, #effort-input:focus,
@@ -89,7 +127,7 @@
   #goal-edit.open + #goal-show { display: none; }
   #goal-input {
     width: 80px; border: 2px solid #111; padding: 6px 8px; text-align: right;
-    font: inherit; font-weight: 700; font-size: 15px;
+    font-weight: 700;
   }
   #bar-track { height: 14px; background: #ececec; margin-top: 12px; }
   #bar-fill { height: 100%; width: 0; background: #111; transition: width 400ms ease; }
@@ -100,8 +138,7 @@
   .entry { margin-top: 24px; }
   .entry-box { border: 2px solid #111; }
   #food-input {
-    display: block; width: 100%; border: none; resize: none;
-    padding: 12px; font: inherit; font-size: 16px;
+    display: block; width: 100%; border: none; resize: none; padding: 12px;
   }
   #food-input:focus { outline: none; }
   #log-btn {
@@ -146,13 +183,17 @@
   .items-head { padding-top: 12px; }  /* flex layout comes from .header-row */
   #empty-msg { padding: 16px 0; font-size: 14px; color: #6b6b6b; }
   #items { list-style: none; }
-  #items li {
-    display: flex; align-items: baseline; justify-content: space-between;
-    padding: 12px 0; border-bottom: 1px solid #dcdcdc;
-  }
+  #items li { display: flex; align-items: baseline; border-bottom: 1px solid #dcdcdc; }
+  /* The row's height lives on its tappable parts, not on the li, so the whole
+     height of a row opens the editor rather than only the band of text across
+     its middle. Baseline alignment means this renders as it did before. One
+     rule holds the rhythm, edit row included, so the two cannot drift apart. */
+  .item-left, .item-grams, #items li.editing { padding: 12px 0; }
   .item-name { font-weight: 700; }
   .item-amount { margin-left: 8px; font-size: 14px; color: #6b6b6b; }
-  .item-left { padding-right: 12px; min-width: 0; cursor: pointer; }
+  /* flex: 1 hands the empty middle of the row to the name, so a thumb aimed
+     between the name and the grams still hits something. */
+  .item-left { flex: 1; padding-right: 12px; min-width: 0; cursor: pointer; }
   .item-right { display: flex; align-items: baseline; gap: 12px; flex-shrink: 0; }
   .item-grams, .edit-grams { font-weight: 900; font-variant-numeric: tabular-nums; }
   .item-grams { cursor: pointer; }
@@ -165,7 +206,10 @@
      The fields wear the shared input box above; only the layout differs. */
   #items li.editing { display: block; }
   .edit-name { display: block; width: 100%; font-weight: 700; }
-  .edit-row { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+  /* Wrapping is the escape hatch for a narrow phone: rather than squeezing the
+     amount field down to a sliver, the buttons drop to their own line. */
+  .edit-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; }
+  .edit-amount { min-width: 6rem; }
   .edit-grams { flex: none; width: 76px; text-align: right; }
 
   /* Week chart */
@@ -249,7 +293,10 @@
 
   <section class="entry">
     <div class="entry-box">
-      <textarea id="food-input" rows="2"
+      <!-- Autocorrect on a phone rewrites the food words it does not know, and a
+           rewritten word is a different food. Typos the model handles; "quark"
+           silently turned into "quart" it does not. -->
+      <textarea id="food-input" rows="2" autocapitalize="none" autocorrect="off" spellcheck="false"
         placeholder="4 fried eggs, 2 spoons of sauerkraut…"></textarea>
       <button id="log-btn" type="button">Log it</button>
     </div>
@@ -790,6 +837,9 @@ function editField(cls, type, value) {
   var i = el("input", cls);
   i.type = type;
   i.value = value;
+  // Enter saves the row (see the keydown below), so the phone's return key
+  // should say "done" rather than offer to submit something.
+  i.setAttribute("enterkeyhint", "done");
   return i;
 }
 
@@ -892,7 +942,11 @@ function startEdit(id) {
   editingId = id;
   editNode = editName = null; // a different row may have been open
   render();                   // builds the row, and sets editName on the way
-  if (editName) editName.focus();
+  // Focusing scrolls the caret into view and no further, leaving Save and cancel
+  // — a line below it — under the keyboard. Suppress that scroll and centre the
+  // whole row instead, so the buttons come with it and nothing scrolls twice.
+  if (editName) editName.focus({ preventScroll: true });
+  if (editNode && editNode.scrollIntoView) editNode.scrollIntoView({ block: "center" });
 }
 
 function stopEdit() {

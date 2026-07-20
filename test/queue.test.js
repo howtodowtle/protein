@@ -105,11 +105,19 @@ const days = (h) => JSON.parse(h.store[h.ctx.KEY_DAYS] || "{}");
 // The rendered list, top to bottom: the names, and the class each row carries.
 const shown = (h) => h.els["items"].children.map((li) => li.children[0].children[0].textContent);
 const marks = (h) => h.els["items"].children.map((li) => li.className);
-// The open editor's row, and its controls found by what they say rather than
-// where they sit, so adding one does not renumber every test that touches it.
-const editRow = (h) => h.els["items"].children.find((li) => /editing/.test(li.className)).children[1];
-const ctl = (row, label) => row.children.find((c) => c.textContent === label);
-const certBtn = (row) => row.children.find((c) => /cert-btn/.test(c.className));
+// Everything inside the open editor, flattened. Which line a field was laid out
+// on, and which group it was nested into, is layout: a test asking for "the
+// button that says Save" should not have to know, and should not break the day
+// the rows are dealt out differently.
+const descendants = (n) => n.children.flatMap((c) => [c].concat(descendants(c)));
+const editParts = (h) => {
+  const li = h.els["items"].children.find((l) => /editing/.test(l.className));
+  return li ? descendants(li) : [];
+};
+// Fields are asked for by class, buttons by what they say — each by the thing
+// about it that a person editing a row would actually go looking for.
+const fld = (h, cls) => editParts(h).find((c) => c.className.includes(cls));
+const ctl = (h, label) => editParts(h).find((c) => c.textContent === label);
 
 let pass = 0, fail = 0;
 function check(name, cond, extra) {
@@ -320,15 +328,13 @@ const baseStore = () => ({ "protein.apiKey": "sk-test", "protein.provider": "ant
     h.store[h.ctx.KEY_DAYS] = JSON.stringify(seeded);
 
     h.ctx.startEdit(before.id);
-    const li = h.els["items"].children[0];
-    const [name, row] = li.children;
-    const [amount, grams] = row.children;
+    const name = fld(h, "edit-name"), amount = fld(h, "edit-amount"), grams = fld(h, "edit-grams");
     check("fields prefilled from the item", name.value === "Eggs" && grams.value === 25, [name.value, grams.value]);
 
     name.value = "  Fried eggs  ";
     amount.value = "4 large";
     grams.value = "31.6";
-    ctl(row, "Save").click();
+    ctl(h, "Save").click();
 
     const after = Object.values(days(h))[0][0];
     check("name trimmed and saved", after.name === "Fried eggs", after);
@@ -350,16 +356,14 @@ const baseStore = () => ({ "protein.apiKey": "sk-test", "protein.provider": "ant
     const id = Object.values(days(h))[0][0].id;
 
     h.ctx.startEdit(id);
-    let [name, row] = h.els["items"].children[0].children;
-    name.value = "   ";
-    ctl(row, "Save").click();
+    fld(h, "edit-name").value = "   ";
+    ctl(h, "Save").click();
     check("blank name not saved", Object.values(days(h))[0][0].name === "Quark", days(h));
     check("still editing", h.ctx.editingId === id, h.ctx.editingId);
 
     // cancel: the typed draft is thrown away, the stored item is untouched
-    [name, row] = h.els["items"].children[0].children;
-    name.value = "Skyr";
-    ctl(row, "cancel").click();
+    fld(h, "edit-name").value = "Skyr";
+    ctl(h, "cancel").click();
     check("cancel discards the draft", Object.values(days(h))[0][0].name === "Quark", days(h));
     check("edit mode closed", h.ctx.editingId === null, h.ctx.editingId);
   }
@@ -374,7 +378,7 @@ const baseStore = () => ({ "protein.apiKey": "sk-test", "protein.provider": "ant
 
     h.ctx.startEdit(Object.values(days(h))[0][0].id);
     const li = h.els["items"].children[0];
-    const name = li.children[0];
+    const name = fld(h, "edit-name");
     check("name field focused on open", h.document.activeElement === name, h.document.activeElement);
     name.value = "half-typed";
     name.selectionStart = 4;
@@ -382,7 +386,7 @@ const baseStore = () => ({ "protein.apiKey": "sk-test", "protein.provider": "ant
     h.ctx.render(); // stands in for a queue drain or an online event
     const after = h.els["items"].children[0];
     check("same node re-attached", after === li, after && after.className);
-    check("draft text kept", after.children[0].value === "half-typed", after.children[0].value);
+    check("draft text kept", fld(h, "edit-name").value === "half-typed", fld(h, "edit-name").value);
     check("focus restored", h.document.activeElement === name, h.document.activeElement && h.document.activeElement.className);
     check("caret restored", name.selectionStart === 4, name.selectionStart);
   }
@@ -460,36 +464,32 @@ const baseStore = () => ({ "protein.apiKey": "sk-test", "protein.provider": "ant
     // Saving is not a claim about the number: the editor carries the row's own
     // certainty across untouched, and the button is the only thing that sets it.
     h.ctx.startEdit(item("Camembert").id);
-    const row = editRow(h);
-    check("editor opens on the stored certainty", certBtn(row).textContent === "not sure", certBtn(row).textContent);
-    row.children[1].value = "14";
-    ctl(row, "Save").click();
+    check("editor opens on the stored certainty", fld(h, "cert-btn").textContent === "not sure", fld(h, "cert-btn").textContent);
+    fld(h, "edit-grams").value = "14";
+    ctl(h, "Save").click();
     check("grams corrected", item("Camembert").protein === 14, stored(h));
     check("certainty untouched by the edit", item("Camembert").certainty === "low", stored(h));
 
     // Tapping cycles it, and it wraps: one tap on the least sure is "sure".
     h.ctx.startEdit(item("Camembert").id);
-    const row2 = editRow(h);
-    certBtn(row2).click();
-    check("tapping cycles the label", certBtn(row2).textContent === "sure", certBtn(row2).textContent);
-    ctl(row2, "Save").click();
+    fld(h, "cert-btn").click();
+    check("tapping cycles the label", fld(h, "cert-btn").textContent === "sure", fld(h, "cert-btn").textContent);
+    ctl(h, "Save").click();
     check("certainty saved from the button", item("Camembert").certainty === "high", stored(h));
     check("and it sorts as sure", shown(h).join() === "Bread,Camembert,Quark,Mystery", shown(h));
 
     // An item the model made no claim about opens as sure: someone looked.
     h.ctx.startEdit(item("Mystery").id);
-    const row3 = editRow(h);
-    check("an unrated row opens as sure", certBtn(row3).textContent === "sure", certBtn(row3).textContent);
-    ctl(row3, "Save").click();
+    check("an unrated row opens as sure", fld(h, "cert-btn").textContent === "sure", fld(h, "cert-btn").textContent);
+    ctl(h, "Save").click();
     check("saving gives it a claim", item("Mystery").certainty === "high", stored(h));
 
     // Once the last of them is settled, the hint goes back to the plain one.
     h.ctx.startEdit(item("Bread").id);
-    const row4 = editRow(h);
-    certBtn(row4).click();
-    certBtn(row4).click();
-    check("cycling wraps round the whole list", certBtn(row4).textContent === "sure", certBtn(row4).textContent);
-    ctl(row4, "Save").click();
+    fld(h, "cert-btn").click();
+    fld(h, "cert-btn").click();
+    check("cycling wraps round the whole list", fld(h, "cert-btn").textContent === "sure", fld(h, "cert-btn").textContent);
+    ctl(h, "Save").click();
     check("nothing dotted left", marks(h).join() === "cert-high,cert-high,cert-high,cert-high", marks(h));
     check("hint back to the plain instruction", /Tap an item/.test(h.els["items-hint"].textContent), h.els["items-hint"].textContent);
 

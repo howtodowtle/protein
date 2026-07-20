@@ -47,6 +47,13 @@
     font: inherit; font-size: 16px;
     -webkit-user-select: text; user-select: text;
   }
+  /* A number field arrives with the browser's own stepper glued inside its right
+     edge: the only control in the app nobody here drew, and it takes the width
+     the number was supposed to sit in. Removing it costs nothing — the type is
+     what raises the numeric keypad and holds the min, not the arrows. */
+  input[type="number"] { -webkit-appearance: textfield; appearance: textfield; }
+  input[type="number"]::-webkit-inner-spin-button,
+  input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
   .wrap { max-width: 28rem; margin: 0 auto; padding: 0 20px 64px; }
 
   header { padding-top: 32px; }
@@ -217,7 +224,10 @@
      between the name and the grams still hits something. */
   .item-left { flex: 1; padding-right: 12px; min-width: 0; cursor: pointer; }
   .item-right { display: flex; align-items: baseline; gap: 12px; flex-shrink: 0; }
-  .item-grams, .edit-grams { font-weight: 900; font-variant-numeric: tabular-nums; }
+  /* The number that moves the day's total, and the unit that names it, wherever
+     either is drawn — read row or editor. One rule, so the weight that means
+     "this is the figure" cannot come to mean two different things. */
+  .item-grams, .edit-grams, .edit-unit { font-weight: 900; font-variant-numeric: tabular-nums; }
   .item-grams { cursor: pointer; }
   .item-del {
     background: none; border: none; cursor: pointer; font-size: 18px;
@@ -230,15 +240,27 @@
      it. The fields wear the shared input box above; only the layout differs. */
   #items li.editing { display: block; border-bottom-style: solid; }
   #items li.editing::after { content: none; }
-  .edit-name { display: block; width: 100%; font-weight: 700; }
-  /* Wrapping is the escape hatch for a narrow phone: rather than squeezing the
-     amount field down to a sliver, the buttons drop to their own line. */
-  .edit-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; }
-  .edit-amount { min-width: 6rem; }
-  .edit-grams { flex: none; width: 76px; text-align: right; }
-  /* Sits with the number it describes; the actions are pushed to the far end so
-     the row reads as "what it is" then "what to do about it". */
-  .cert-btn { margin-right: auto; }
+  /* Two lines, and two is the ceiling: what the thing is, then what its number is
+     and what to do about it. The name and the amount share the first because they
+     are one description of one food — which is how the read row prints them, side
+     by side — and splitting them cost a whole line to say nothing. */
+  .edit-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+  .edit-row + .edit-row { margin-top: 8px; }
+  /* One constraint, not two: wide enough that neither field is a sliver, narrow
+     enough that both still fit across the smallest phone. Below that the flex
+     wrap takes over. Tuning it means tuning it for the pair. */
+  .edit-name, .edit-amount { min-width: 7rem; }
+  .edit-name { font-weight: 700; }
+  .edit-grams { flex: none; width: 60px; text-align: right; }
+  /* Sits with the number it describes, held to the width of its longest label so
+     that cycling it cannot resize the field under the thumb doing the tapping. */
+  .cert-btn { min-width: 5rem; }
+  /* Save and cancel travel together at the far end, so the second line reads as
+     "what it weighs" then "what to do about it". Grouping them is also what keeps
+     the wrap survivable on a phone too narrow even for this: the pair drops to a
+     line still together and still right-aligned, rather than one going over alone
+     and the other keeping its seat. */
+  .edit-actions { display: flex; align-items: center; gap: 12px; margin-left: auto; }
 
   /* Week chart */
   .week-section { margin-top: 32px; }
@@ -967,16 +989,27 @@ function editRow(it) {
   save.addEventListener("click", commit);
   cancel.addEventListener("click", stopEdit);
 
-  var row = el("div", "edit-row");
-  row.appendChild(amount);
-  row.appendChild(grams);
-  row.appendChild(certBtn);
-  row.appendChild(save);
-  row.appendChild(cancel);
+  // cancel first, Save last: the one that keeps the change gets the right edge,
+  // which on a phone is the corner the thumb is already resting in.
+  var actions = el("div", "edit-actions");
+  actions.appendChild(cancel);
+  actions.appendChild(save);
+
+  var what = el("div", "edit-row");
+  what.appendChild(name);
+  what.appendChild(amount);
+
+  // The unit every read row prints, kept for the one moment it matters most: the
+  // field to its left holds a number too, and this is the one that moves the total.
+  var howMuch = el("div", "edit-row");
+  howMuch.appendChild(grams);
+  howMuch.appendChild(el("span", "edit-unit", "g"));
+  howMuch.appendChild(certBtn);
+  howMuch.appendChild(actions);
 
   var li = el("li", "editing");
-  li.appendChild(name);
-  li.appendChild(row);
+  li.appendChild(what);
+  li.appendChild(howMuch);
   li.addEventListener("keydown", function (e) {
     if (e.key === "Enter") { e.preventDefault(); commit(); }
     else if (e.key === "Escape") stopEdit();

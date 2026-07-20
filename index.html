@@ -34,11 +34,17 @@
   #settings h2 { font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.1em; }
   #settings p { font-size: 13px; color: #6b6b6b; margin-top: 6px; line-height: 1.4; }
   .settings-row { display: flex; gap: 8px; margin-top: 10px; }
-  #api-key-input {
+  #api-key-input, #model-input, #provider-select {
     flex: 1; min-width: 0; border: 2px solid #111; padding: 8px 10px;
-    font: inherit; font-size: 14px;
+    font: inherit; font-size: 14px; background: #fff; color: #111; border-radius: 0;
   }
-  #api-key-input:focus { outline: 2px solid #111; outline-offset: 1px; }
+  #api-key-input:focus, #model-input:focus, #provider-select:focus {
+    outline: 2px solid #111; outline-offset: 1px;
+  }
+  .field-label {
+    font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em;
+    color: #6b6b6b; margin-top: 12px;
+  }
 
   .btn-solid {
     background: #111; color: #fff; border: none; font: inherit; font-weight: 700;
@@ -128,13 +134,20 @@
   </header>
 
   <section id="settings">
-    <h2>API key</h2>
-    <p>Paste your Anthropic API key. It is stored only in this browser
-       (localStorage) and sent only to api.anthropic.com.</p>
+    <h2>Provider</h2>
     <div class="settings-row">
-      <input id="api-key-input" type="password" placeholder="sk-ant-…" autocomplete="off">
+      <select id="provider-select"></select>
+    </div>
+    <div class="field-label">API key</div>
+    <div class="settings-row">
+      <input id="api-key-input" type="password" placeholder="" autocomplete="off">
+    </div>
+    <div class="field-label">Model <span id="model-default"></span></div>
+    <div class="settings-row">
+      <input id="model-input" type="text" placeholder="" autocomplete="off" spellcheck="false">
       <button id="api-key-save" class="btn-solid" type="button">Save</button>
     </div>
+    <p id="settings-note"></p>
   </section>
 
   <section class="total-section">
@@ -184,10 +197,130 @@
 <script>
 "use strict";
 
+// ---------- providers ----------
+// Each provider maps the same request/response contract onto its own wire format.
+var PROVIDERS = {
+  anthropic: {
+    label: "Anthropic (Claude)",
+    host: "api.anthropic.com",
+    model: "claude-haiku-4-5-20251001",
+    keyHint: "sk-ant-…",
+    request: function (key, model, prompt) {
+      return {
+        url: "https://api.anthropic.com/v1/messages",
+        headers: {
+          "x-api-key": key,
+          "anthropic-version": "2023-06-01",
+          "content-type": "application/json",
+          "anthropic-dangerous-direct-browser-access": "true"
+        },
+        body: {
+          model: model,
+          max_tokens: 500,
+          messages: [{ role: "user", content: prompt }]
+        }
+      };
+    },
+    extract: function (data) {
+      return (data.content || [])
+        .filter(function (b) { return b.type === "text"; })
+        .map(function (b) { return b.text; })
+        .join("\n");
+    }
+  },
+
+  deepseek: {
+    label: "DeepSeek",
+    host: "api.deepseek.com",
+    model: "deepseek-chat",
+    keyHint: "sk-…",
+    request: function (key, model, prompt) {
+      return openaiRequest("https://api.deepseek.com/chat/completions", key, model, prompt);
+    },
+    extract: openaiExtract
+  },
+
+  kimi: {
+    label: "Kimi (Moonshot)",
+    host: "api.moonshot.ai",
+    model: "kimi-latest",
+    keyHint: "sk-…",
+    request: function (key, model, prompt) {
+      return openaiRequest("https://api.moonshot.ai/v1/chat/completions", key, model, prompt);
+    },
+    extract: openaiExtract
+  },
+
+  gemini: {
+    label: "Google Gemini",
+    host: "generativelanguage.googleapis.com",
+    model: "gemini-2.5-flash",
+    keyHint: "AIza…",
+    request: function (key, model, prompt) {
+      return {
+        url: "https://generativelanguage.googleapis.com/v1beta/models/" +
+             encodeURIComponent(model) + ":generateContent",
+        headers: {
+          "x-goog-api-key": key,
+          "content-type": "application/json"
+        },
+        body: {
+          contents: [{ role: "user", parts: [{ text: prompt }] }],
+          generationConfig: { responseMimeType: "application/json", maxOutputTokens: 2000 }
+        }
+      };
+    },
+    extract: function (data) {
+      var cand = (data.candidates || [])[0];
+      var parts = (cand && cand.content && cand.content.parts) || [];
+      return parts.map(function (p) { return p.text || ""; }).join("\n");
+    }
+  }
+};
+
+// OpenAI-compatible chat/completions shape, shared by DeepSeek and Kimi.
+function openaiRequest(url, key, model, prompt) {
+  return {
+    url: url,
+    headers: {
+      "authorization": "Bearer " + key,
+      "content-type": "application/json"
+    },
+    body: {
+      model: model,
+      max_tokens: 500,
+      messages: [{ role: "user", content: prompt }]
+    }
+  };
+}
+function openaiExtract(data) {
+  var choice = (data.choices || [])[0];
+  return (choice && choice.message && choice.message.content) || "";
+}
+
+var PROVIDER_IDS = Object.keys(PROVIDERS);
+var DEFAULT_PROVIDER = "anthropic";
+
 // ---------- storage ----------
-var KEY_API = "protein.apiKey";
 var KEY_GOAL = "protein.goal";
 var KEY_DAYS = "protein.days";
+var KEY_PROVIDER = "protein.provider";
+
+// Anthropic keeps the original key name so existing installs keep working.
+function keyStorageKey(id) {
+  return id === "anthropic" ? "protein.apiKey" : "protein.apiKey." + id;
+}
+function modelStorageKey(id) { return "protein.model." + id; }
+
+function provider() {
+  var id = localStorage.getItem(KEY_PROVIDER);
+  return PROVIDERS[id] ? id : DEFAULT_PROVIDER;
+}
+function apiKey(id) { return localStorage.getItem(keyStorageKey(id || provider())) || ""; }
+function modelFor(id) {
+  id = id || provider();
+  return (localStorage.getItem(modelStorageKey(id)) || "").trim() || PROVIDERS[id].model;
+}
 
 function loadDays() {
   try {
@@ -204,7 +337,6 @@ function loadGoal() {
   var g = parseInt(localStorage.getItem(KEY_GOAL), 10);
   return g > 0 ? g : 200;
 }
-function apiKey() { return localStorage.getItem(KEY_API) || ""; }
 
 // ---------- dates ----------
 function fmt(d) {
@@ -214,7 +346,7 @@ function fmt(d) {
 }
 function todayKey() { return fmt(new Date()); }
 
-// ---------- Claude parsing ----------
+// ---------- parsing ----------
 var PARSE_PROMPT =
   'You are a protein estimator. The input is a casual, fuzzy description of ' +
   'food someone ate (any language, vague amounts allowed). Split it into items ' +
@@ -225,34 +357,39 @@ var PARSE_PROMPT =
   'whole number >= 0 for the stated amount (not per unit). Keep names short ' +
   'and capitalized. Input: ';
 
-async function parseFood(text) {
-  var res = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "x-api-key": apiKey(),
-      "anthropic-version": "2023-06-01",
-      "content-type": "application/json",
-      "anthropic-dangerous-direct-browser-access": "true"
-    },
-    body: JSON.stringify({
-      model: "claude-haiku-4-5-20251001",
-      max_tokens: 500,
-      messages: [{ role: "user", content: PARSE_PROMPT + JSON.stringify(text) }]
-    })
-  });
+function apiError(msg) {
+  var err = new Error(msg);
+  err.isApi = true;
+  return err;
+}
 
-  var data = await res.json();
-  if (!res.ok) {
-    var msg = (data && data.error && data.error.message) || ("API error (" + res.status + ")");
-    var err = new Error(msg);
-    err.isApi = true;
-    throw err;
+async function parseFood(text) {
+  var id = provider();
+  var p = PROVIDERS[id];
+  var req = p.request(apiKey(id), modelFor(id), PARSE_PROMPT + JSON.stringify(text));
+
+  var res;
+  try {
+    res = await fetch(req.url, {
+      method: "POST",
+      headers: req.headers,
+      body: JSON.stringify(req.body)
+    });
+  } catch (e) {
+    // fetch only rejects on network/CORS failure, never on HTTP error status
+    throw apiError("Couldn't reach " + p.host + " — network error, or the provider blocks browser requests (CORS).");
   }
 
-  var raw = (data.content || [])
-    .filter(function (b) { return b.type === "text"; })
-    .map(function (b) { return b.text; })
-    .join("\n");
+  var data = null;
+  try { data = await res.json(); } catch (e) {}
+
+  if (!res.ok) {
+    // Anthropic, DeepSeek, Kimi and Gemini all nest the message the same way
+    var msg = (data && data.error && data.error.message) || ("API error (" + res.status + ")");
+    throw apiError(msg);
+  }
+
+  var raw = p.extract(data || {});
   var clean = raw.replace(/```json|```/g, "").trim();
   var arr = JSON.parse(clean);
   if (!Array.isArray(arr)) throw new Error("bad shape");
@@ -273,6 +410,8 @@ async function parseFood(text) {
 // ---------- elements ----------
 var $ = function (id) { return document.getElementById(id); };
 var settingsEl = $("settings"), keyInput = $("api-key-input");
+var providerSelect = $("provider-select"), modelInput = $("model-input");
+var modelDefault = $("model-default"), settingsNote = $("settings-note");
 var totalEl = $("total"), goalShow = $("goal-show"), goalEdit = $("goal-edit"), goalInput = $("goal-input");
 var barFill = $("bar-fill"), goalMsg = $("goal-msg");
 var foodInput = $("food-input"), logBtn = $("log-btn"), errorEl = $("error");
@@ -384,8 +523,7 @@ async function log() {
   if (!text || logBtn.disabled) return;
 
   if (!apiKey()) {
-    settingsEl.classList.add("open");
-    keyInput.focus();
+    openSettings();
     showError("Add your API key first.");
     return;
   }
@@ -426,21 +564,58 @@ foodInput.addEventListener("keydown", function (e) {
   }
 });
 
+PROVIDER_IDS.forEach(function (id) {
+  var opt = document.createElement("option");
+  opt.value = id;
+  opt.textContent = PROVIDERS[id].label;
+  providerSelect.appendChild(opt);
+});
+
+// Fill the settings fields from whatever provider is selected in the dropdown.
+function syncSettings() {
+  var id = providerSelect.value;
+  var p = PROVIDERS[id];
+  keyInput.value = apiKey(id);
+  keyInput.placeholder = p.keyHint;
+  modelInput.value = localStorage.getItem(modelStorageKey(id)) || "";
+  modelInput.placeholder = p.model;
+  modelDefault.textContent = "(optional)";
+  settingsNote.textContent =
+    "Your key is stored only in this browser (localStorage) and sent only to " +
+    p.host + ". Requests go straight from your browser to the provider.";
+}
+
+function openSettings() {
+  settingsEl.classList.add("open");
+  providerSelect.value = provider();
+  syncSettings();
+  keyInput.focus();
+}
+
 $("settings-toggle").addEventListener("click", function () {
-  settingsEl.classList.toggle("open");
-  if (settingsEl.classList.contains("open")) {
-    keyInput.value = apiKey();
-    keyInput.focus();
-  }
+  if (settingsEl.classList.contains("open")) settingsEl.classList.remove("open");
+  else openSettings();
 });
-$("api-key-save").addEventListener("click", saveKey);
-keyInput.addEventListener("keydown", function (e) {
-  if (e.key === "Enter") { e.preventDefault(); saveKey(); }
+providerSelect.addEventListener("change", syncSettings);
+
+$("api-key-save").addEventListener("click", saveSettings);
+[keyInput, modelInput].forEach(function (el) {
+  el.addEventListener("keydown", function (e) {
+    if (e.key === "Enter") { e.preventDefault(); saveSettings(); }
+  });
 });
-function saveKey() {
-  var v = keyInput.value.trim();
-  if (!v) return;
-  try { localStorage.setItem(KEY_API, v); } catch (e) {}
+function saveSettings() {
+  var id = providerSelect.value;
+  if (!PROVIDERS[id]) return;
+  var key = keyInput.value.trim();
+  var model = modelInput.value.trim();
+  try {
+    localStorage.setItem(KEY_PROVIDER, id);
+    if (key) localStorage.setItem(keyStorageKey(id), key);
+    if (model) localStorage.setItem(modelStorageKey(id), model);
+    else localStorage.removeItem(modelStorageKey(id));
+  } catch (e) {}
+  if (!apiKey(id)) { keyInput.focus(); showError("Add your API key first."); return; }
   settingsEl.classList.remove("open");
   showError("");
   foodInput.focus();
@@ -464,6 +639,8 @@ function saveGoal() {
 }
 
 // first run: no key -> open settings
+providerSelect.value = provider();
+syncSettings();
 if (!apiKey()) settingsEl.classList.add("open");
 render();
 

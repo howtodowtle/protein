@@ -102,6 +102,9 @@ const settle = () => new Promise((r) => setTimeout(r, 30));
 // these loudly, not silently make them read an absent key and pass.
 const q = (h) => JSON.parse(h.store[h.ctx.KEY_QUEUE] || "[]");
 const days = (h) => JSON.parse(h.store[h.ctx.KEY_DAYS] || "{}");
+// The rendered list, top to bottom: the names, and the class each row carries.
+const shown = (h) => h.els["items"].children.map((li) => li.children[0].children[0].textContent);
+const marks = (h) => h.els["items"].children.map((li) => li.className);
 
 let pass = 0, fail = 0;
 function check(name, cond, extra) {
@@ -304,6 +307,13 @@ const baseStore = () => ({ "protein.apiKey": "sk-test", "protein.provider": "ant
     await settle();
     const before = Object.values(days(h))[0][0];
 
+    // Stand-in for a field a later version adds: a correction must merge over
+    // the stored item, not rebuild it from the fields the editor happens to
+    // know, or fixing one number silently deletes another.
+    const seeded = days(h), day = Object.keys(seeded)[0];
+    seeded[day][0].note = "keep me";
+    h.store[h.ctx.KEY_DAYS] = JSON.stringify(seeded);
+
     h.ctx.startEdit(before.id);
     const li = h.els["items"].children[0];
     const [name, row] = li.children;
@@ -320,6 +330,7 @@ const baseStore = () => ({ "protein.apiKey": "sk-test", "protein.provider": "ant
     check("amount saved", after.amount === "4 large", after);
     check("protein rounded to an integer", after.protein === 32, after);
     check("id preserved", after.id === before.id, [before.id, after.id]);
+    check("an unknown field survives the edit", after.note === "keep me", after);
     check("still one item", Object.values(days(h))[0].length === 1, days(h));
     check("edit mode closed", h.ctx.editingId === null, h.ctx.editingId);
   }
@@ -374,9 +385,6 @@ const baseStore = () => ({ "protein.apiKey": "sk-test", "protein.provider": "ant
   // ---- 14. list order: newest first by default, by grams on request
   {
     console.log("14. sorting");
-    // Names of the rendered rows, top to bottom.
-    const shown = (h) => h.els["items"].children.map((li) => li.children[0].children[0].textContent);
-
     // The queue drains in submission order (see 5), so reply N answers entry N.
     const replies = [
       [{ name: "Egg", amount: "", protein_g: 20 }],
@@ -406,7 +414,61 @@ const baseStore = () => ({ "protein.apiKey": "sk-test", "protein.provider": "ant
     h.els["sort-toggle"].click();
     check("toggling out of an unknown mode lands on a known one", shown(h).join() === "Egg,Milk,Rice", shown(h));
     h.els["sort-toggle"].click();
-    check("toggles back", shown(h).join() === "Milk,Rice,Egg", shown(h));
+    check("third mode is certainty", h.els["sort-toggle"].textContent === "least sure", h.els["sort-toggle"].textContent);
+    h.els["sort-toggle"].click();
+    check("cycles back round to the default", h.els["sort-toggle"].textContent === "newest first", h.els["sort-toggle"].textContent);
+    check("and back to newest first order", shown(h).join() === "Milk,Rice,Egg", shown(h));
+  }
+
+  // ---- 15. certainty: marked, sorted, and cleared by a correction
+  {
+    console.log("15. certainty");
+    const stored = (h) => days(h)[Object.keys(days(h))[0]];
+
+    const h = makeHarness({
+      store: { ...baseStore(), "protein.sort": "certainty" },
+      fetchImpl: async () => ok([
+        { name: "Quark", amount: "200 g", protein_g: 19, certainty: "high" },
+        { name: "Camembert", amount: "3 slices", protein_g: 12, certainty: "low" },
+        { name: "Bread", amount: "2 slices", protein_g: 8, certainty: "medium" },
+        // A word from a later schema, or a model that ignored the enum.
+        { name: "Mystery", amount: "1", protein_g: 3, certainty: "probably" },
+      ]),
+    });
+    h.els["food-input"].value = "everything";
+    h.els["log-btn"].click();
+    await settle();
+
+    // One assertion over the whole fixture, so adding a case to it cannot leave
+    // a hand-picked index quietly checking the wrong row.
+    check("known words kept verbatim, unknown collapses to no claim",
+      stored(h).map((i) => i.certainty).join() === "high,low,medium,", stored(h));
+    // Equal ranks keep newest-first order, so the two unranked ones stay reversed.
+    check("least sure first", shown(h).join() === "Camembert,Bread,Mystery,Quark", shown(h));
+    check("only the unsure are marked", marks(h).join() === "cert cert-low,cert cert-medium,,", marks(h));
+    check("hint explains the marks", /Marked items/.test(h.els["items-hint"].textContent), h.els["items-hint"].textContent);
+
+    // Correcting a row is the user vouching for the number: the mark goes.
+    h.ctx.startEdit(stored(h).find((i) => i.name === "Camembert").id);
+    const row = h.els["items"].children[0].children[1];
+    row.children[1].value = "14";
+    row.children[2].click();
+    check("correction clears the mark", stored(h).find((i) => i.name === "Camembert").certainty === "high", stored(h));
+    check("and it sorts as sure", shown(h).join() === "Bread,Mystery,Camembert,Quark", shown(h));
+
+    // Once the last guess is corrected away, the hint goes back to plain.
+    h.ctx.startEdit(stored(h).find((i) => i.name === "Bread").id);
+    const row2 = h.els["items"].children[0].children[1];
+    row2.children[2].click();
+    check("no marks left", marks(h).join() === ",,,", marks(h));
+    check("hint back to the plain instruction", /Tap an item/.test(h.els["items-hint"].textContent), h.els["items-hint"].textContent);
+
+    // Items logged before the field existed must not all light up.
+    const h2 = makeHarness({
+      store: { ...baseStore(), "protein.days": JSON.stringify({ [Object.keys(days(h))[0]]: [{ id: "old", name: "Legacy", amount: "", protein: 5 }] }) },
+      fetchImpl: async () => ok([]),
+    });
+    check("an item with no certainty field is unmarked", marks(h2).join() === "", marks(h2));
   }
 
   console.log("\n" + pass + " passed, " + fail + " failed");

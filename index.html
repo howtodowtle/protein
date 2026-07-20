@@ -201,6 +201,21 @@
     background: none; border: none; cursor: pointer; font-size: 18px;
     line-height: 1; padding: 0 4px; color: #6b6b6b;
   }
+  /* How much of the number the model had to guess. A row it was sure about is
+     drawn exactly as it always was — the mark is ink spent only where there is
+     something worth checking. It thickens a short stretch of the row's own
+     rule, so it belongs to the type; the further left it sits the less sure the
+     row, and stacked rows put the least sure ones in a column down the margin. */
+  #items li.cert { position: relative; }
+  #items li.cert::after {
+    content: ""; position: absolute; bottom: -2px; left: 0;
+    height: 3px; width: 18px; background: #111;
+  }
+  /* The mark itself hangs off the plain .cert class, and only the offset is per
+     word. A word added to CERTAINTY later is then still marked — at the least
+     sure position, until someone gives it one — rather than silently drawing
+     nothing while the sort and the hint both go on treating it as a guess. */
+  #items li.cert-medium::after { left: 26px; }
 
   /* Correcting an estimate: the row turns into its own fields, in place.
      The fields wear the shared input box above; only the layout differs. */
@@ -313,7 +328,9 @@
     </div>
     <p id="empty-msg">Nothing logged yet. Type what you ate.</p>
     <ul id="items"></ul>
-    <p id="items-hint" class="footnote">Tap an item to fix its name, amount or grams.</p>
+    <!-- Text comes from render(), which has two sentences to choose between.
+         Left empty here so the wording has one owner, as with #sort-toggle. -->
+    <p id="items-hint" class="footnote"></p>
   </section>
 
   <section class="week-section">
@@ -529,10 +546,30 @@ function loadGoal() {
   var g = parseInt(localStorage.getItem(KEY_GOAL), 10);
   return g > 0 ? g : 200;
 }
-// How the day's list is ordered. "recent" is the default because the thing you
-// just ate is the thing you are looking at. Anything unrecognised reads as
-// "recent", so a stale or hand-edited value degrades to the default.
-function loadSort() { return localStorage.getItem(KEY_SORT) === "protein" ? "protein" : "recent"; }
+// How the day's list can be ordered. One object holds all three of the modes,
+// the order the toggle cycles them (keys keep their insertion order) and their
+// labels, so adding a mode is one line and there is no second list to forget.
+// "recent" leads because the thing you just ate is the thing you are looking
+// at, and anything unrecognised falls back to it, so a stale or hand-edited
+// value degrades to the default.
+var SORT_LABELS = { recent: "newest first", protein: "most protein", certainty: "least sure" };
+var SORTS = Object.keys(SORT_LABELS);
+function loadSort() {
+  var s = localStorage.getItem(KEY_SORT);
+  return SORTS.indexOf(s) < 0 ? "recent" : s;
+}
+
+// How much of an item's number the model had to guess. Sure first, so the index
+// doubles as the rank. Only these three words mean anything: a word we don't
+// know, and an item saved before the field existed, both rank as sure and so
+// draw no mark — silence is the safe default, and the alternative would flag
+// every item ever logged. An array, not an object, so a name like "constructor"
+// cannot come back as a match.
+var CERTAINTY = ["high", "medium", "low"];
+function certRank(v) {
+  var i = CERTAINTY.indexOf(v);
+  return i < 0 ? 0 : i;
+}
 
 // ---------- queue ----------
 // Every submission lands here first and is only removed once it has been parsed
@@ -566,7 +603,7 @@ var PARSE_PROMPT = [
   '',
   'Rules:',
   '- Respond with ONLY a raw JSON array. No markdown fences, no prose, no text before or after.',
-  '- Schema: [{"name": string, "amount": string, "protein_g": number}]',
+  '- Schema: [{"name": string, "amount": string, "protein_g": number, "certainty": "high"|"medium"|"low"}]',
   '- protein_g is a whole number >= 0 for the whole stated amount, not per unit.',
   '- One object per food mentioned, in the order mentioned. Never merge items and never drop one:',
   '  list near-zero foods (butter, oil, most vegetables) with protein_g 0.',
@@ -583,35 +620,46 @@ var PARSE_PROMPT = [
   '- Name the food the user named. Do not upgrade or specialise it: "1 Riegel mit 7 g Protein"',
   '  is a "Riegel", not a "Proteinriegel".',
   '- Keep names short and capitalized. Keep the local name for regional products (Bauernbrot, Magerquark).',
+  '- certainty is per item and says how much of that one figure you had to guess. Judge it on',
+  '  two things only: (a) is the quantity pinned down, (b) is the protein content of that food',
+  '  narrow or does it range widely. Both good -> "high". Neither -> "low". One but not the',
+  '  other -> "medium". Judge the input you were given, not how good your answer is:',
+  '    "4 eggs"                 -> high    counted, and an egg is an egg',
+  '    "a bowl of yoghurt"      -> medium  portion guessed, but yoghurt is yoghurt',
+  '    "50 g cheese"            -> medium  weighed, but cheese runs 10-35 g per 100 g',
+  '    "3 slices of camembert"  -> low     slice size unknown and camembert varies',
+  '  Two things make an item certain whatever its amount: a protein figure the user read off',
+  '  the packaging, and a food with essentially no protein (butter, oil) — both are "high".',
   '',
   'Example input: "4 fried eggs, 3 slices of Bauernbrot, a bit of butter, and 2 thin slices of camembert"',
   'Example output:',
-  '[{"name":"Fried eggs","amount":"4 eggs, ~220 g","protein_g":25},',
-  ' {"name":"Bauernbrot","amount":"3 slices, ~135 g","protein_g":10},',
-  ' {"name":"Butter","amount":"~10 g","protein_g":0},',
-  ' {"name":"Camembert","amount":"2 thin slices, ~40 g","protein_g":8}]',
+  '[{"name":"Fried eggs","amount":"4 eggs, ~220 g","protein_g":25,"certainty":"high"},',
+  ' {"name":"Bauernbrot","amount":"3 slices, ~135 g","protein_g":10,"certainty":"medium"},',
+  ' {"name":"Butter","amount":"~10 g","protein_g":0,"certainty":"high"},',
+  ' {"name":"Camembert","amount":"2 thin slices, ~40 g","protein_g":8,"certainty":"low"}]',
   '',
   'Example input: "250 g joghurt + 200 g magerquark"',
   'Example output:',
-  '[{"name":"Joghurt","amount":"250 g","protein_g":11},',
-  ' {"name":"Magerquark","amount":"200 g","protein_g":19}]',
+  '[{"name":"Joghurt","amount":"250 g","protein_g":11,"certainty":"high"},',
+  ' {"name":"Magerquark","amount":"200 g","protein_g":19,"certainty":"high"}]',
   '',
   'Example input: "1 riegel mit 7.3 g protein"   (protein stated, so use it)',
   'Example output:',
-  '[{"name":"Riegel","amount":"1 Riegel","protein_g":7}]',
+  '[{"name":"Riegel","amount":"1 Riegel","protein_g":7,"certainty":"high"}]',
   '',
   'These four inputs all describe the same meal and must all give the same protein figure.',
   'A slice of Bündnerfleisch weighs about 6 g and holds about 2.5 g of protein, so 4 slices',
   'are ~24 g of meat and ~10 g of protein — whether the user states the weight, the protein,',
-  'or nothing at all:',
-  '  "4 scheiben bündnerfleisch"                        -> [{"name":"Bündnerfleisch","amount":"4 Scheiben, ~24 g","protein_g":10}]',
-  '  "4 scheiben bündnerfleisch zu je 6 g"              -> [{"name":"Bündnerfleisch","amount":"4 Scheiben, 24 g","protein_g":10}]',
-  '  "4 scheiben bündnerfleisch mit je 2.5 g protein"   -> [{"name":"Bündnerfleisch","amount":"4 Scheiben, ~24 g","protein_g":10}]',
-  '  "bündnerfleisch mit 10 g protein"                  -> [{"name":"Bündnerfleisch","amount":"~24 g","protein_g":10}]',
+  'or nothing at all. The figure is the same in all four; only how much was guessed differs,',
+  'which is exactly what certainty records:',
+  '  "4 scheiben bündnerfleisch"                        -> [{"name":"Bündnerfleisch","amount":"4 Scheiben, ~24 g","protein_g":10,"certainty":"medium"}]',
+  '  "4 scheiben bündnerfleisch zu je 6 g"              -> [{"name":"Bündnerfleisch","amount":"4 Scheiben, 24 g","protein_g":10,"certainty":"high"}]',
+  '  "4 scheiben bündnerfleisch mit je 2.5 g protein"   -> [{"name":"Bündnerfleisch","amount":"4 Scheiben, ~24 g","protein_g":10,"certainty":"high"}]',
+  '  "bündnerfleisch mit 10 g protein"                  -> [{"name":"Bündnerfleisch","amount":"~24 g","protein_g":10,"certainty":"high"}]',
   '',
   'Example input: "1 scheibe brot mit 40 g protein"   (impossible for one slice, so estimate it)',
   'Example output:',
-  '[{"name":"Brot","amount":"1 Scheibe, ~45 g","protein_g":4}]',
+  '[{"name":"Brot","amount":"1 Scheibe, ~45 g","protein_g":4,"certainty":"medium"}]',
   '',
   'Now do the same for this input: '
 ].join("\n");
@@ -685,7 +733,10 @@ async function parseFood(text) {
         id: newId(),
         name: x.name,
         amount: String(x.amount == null ? "" : x.amount),
-        protein: Math.max(0, Math.round(Number(x.protein_g) || 0))
+        protein: Math.max(0, Math.round(Number(x.protein_g) || 0)),
+        // Kept as the word the model sent, not as a rank: the rank is a display
+        // decision, and a later feature may want to tell "sure" from "silent".
+        certainty: CERTAINTY.indexOf(x.certainty) < 0 ? "" : x.certainty
       };
     });
 }
@@ -727,10 +778,13 @@ function sumProtein(items) {
 // Items carry no timestamp: a day is stored in the order things were logged, so
 // the array's own order is the record of when. Reversing a copy gives newest
 // first and leaves storage — and the drain's append — untouched. Sorting that
-// copy by grams is stable, so equal amounts stay newest first too.
+// copy by grams is stable, so equal amounts stay newest first too — and so do
+// equally sure items.
 function sortItems(items, mode) {
   var out = items.slice().reverse();
   if (mode === "protein") out.sort(function (a, b) { return b.protein - a.protein; });
+  // Least sure first: this order exists to be worked down and emptied.
+  else if (mode === "certainty") out.sort(function (a, b) { return certRank(b.certainty) - certRank(a.certainty); });
   return out;
 }
 
@@ -769,10 +823,16 @@ function render() {
   itemsEl.innerHTML = "";
   emptyMsg.style.display = items.length ? "none" : "block";
   itemsHint.style.display = items.length ? "block" : "none";
+  // A mark nobody can read is decoration, so the hint explains itself the moment
+  // there is a mark to explain — and goes back to the plain instruction once the
+  // last guess has been corrected away.
+  itemsHint.textContent = items.some(function (i) { return certRank(i.certainty); })
+    ? "Marked items were partly guessed — tap one to fix it."
+    : "Tap an item to fix its name, amount or grams.";
   // One item cannot be out of order, so the control only earns its space at two.
   itemsHead.style.display = items.length > 1 ? "flex" : "none";
   var sort = loadSort();
-  sortToggle.textContent = sort === "protein" ? "most protein" : "newest first";
+  sortToggle.textContent = SORT_LABELS[sort];
   sortToggle.setAttribute("aria-label", "Sort: " + sortToggle.textContent + ". Tap to change.");
   sortItems(items, sort).forEach(function (it) {
     // A row being edited is moved, not rebuilt: a background render (a queued
@@ -791,7 +851,8 @@ function render() {
     right.appendChild(grams);
     right.appendChild(delButton("item-del", "Remove " + it.name, function () { removeItem(it.id); }));
 
-    var li = el("li");
+    // Rank 0 is "sure", and also "said nothing": neither earns a mark.
+    var li = el("li", certRank(it.certainty) ? "cert cert-" + it.certainty : "");
     li.appendChild(left);
     li.appendChild(right);
     var edit = function () { startEdit(it.id); };
@@ -962,8 +1023,16 @@ function updateItem(id, fields) {
   var days = loadDays();
   var key = todayKey();
   days[key] = (days[key] || []).map(function (i) {
+    // Merged over the stored item, not rebuilt from a list of fields: a field
+    // added later survives a correction whether or not anyone remembered this
+    // line. Rebuilding would delete it — and silently, since the row the user
+    // just fixed is the one it would be deleted from.
+    // The certainty is set because a number you typed yourself is not a guess:
+    // correcting a row clears its mark, so the list of things to check empties.
     return i.id === id
-      ? { id: i.id, name: fields.name, amount: fields.amount, protein: fields.protein }
+      ? Object.assign({}, i, {
+          name: fields.name, amount: fields.amount, protein: fields.protein, certainty: "high"
+        })
       : i;
   });
   if (!saveDays(days)) showError(STORAGE_FAIL);
@@ -1181,7 +1250,8 @@ function saveSettings() {
 }
 
 sortToggle.addEventListener("click", function () {
-  try { localStorage.setItem(KEY_SORT, loadSort() === "protein" ? "recent" : "protein"); } catch (e) {}
+  var next = SORTS[(SORTS.indexOf(loadSort()) + 1) % SORTS.length];
+  try { localStorage.setItem(KEY_SORT, next); } catch (e) {}
   render();
 });
 

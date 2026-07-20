@@ -70,7 +70,6 @@
     background: #111; color: #fff; border: none; font: inherit; font-weight: 700;
     padding: 8px 14px; cursor: pointer; font-size: 14px;
   }
-  .btn-solid:disabled { opacity: 0.4; cursor: default; }
 
   /* Total vs goal */
   .total-section { padding-top: 16px; }
@@ -106,7 +105,6 @@
     display: block; width: 100%; background: #111; color: #fff; border: none;
     font: inherit; font-weight: 700; font-size: 16px; padding: 12px; cursor: pointer;
   }
-  #log-btn:disabled { opacity: 0.4; cursor: default; }
   #error {
     margin-top: 8px; font-size: 14px; font-weight: 700; color: #b3261e; display: none;
     white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.35;
@@ -193,7 +191,7 @@
     <div class="settings-row">
       <input id="api-key-input" type="password" placeholder="" autocomplete="off">
     </div>
-    <div class="field-label">Model <span id="model-default"></span></div>
+    <div class="field-label">Model <span>(optional)</span></div>
     <div class="settings-row">
       <input id="model-input" type="text" placeholder="" autocomplete="off" spellcheck="false">
     </div>
@@ -275,6 +273,19 @@
 // passed through verbatim — no whitelist here, so new API values keep working.
 var THINKING_BUDGET = 4000; // room for reasoning tokens when thinking is on
 
+// The messages-shaped body Anthropic and the OpenAI-compatible providers agree on.
+// Only the "thinking on" type string and where effort lands actually differ, so
+// those get layered on by the caller.
+function chatBody(model, prompt, opts) {
+  var body = {
+    model: model,
+    max_tokens: opts.thinking === "on" ? THINKING_BUDGET : 500,
+    messages: [{ role: "user", content: prompt }]
+  };
+  if (opts.thinking === "off") body.thinking = { type: "disabled" };
+  return body;
+}
+
 var PROVIDERS = {
   anthropic: {
     label: "Anthropic (Claude)",
@@ -285,15 +296,10 @@ var PROVIDERS = {
     efforts: ["low", "medium", "high", "xhigh", "max"],
     effortNote: "output_config.effort — Claude 4.6+ only (xhigh: 4.7+). Haiku 4.5 has no effort setting.",
     request: function (key, model, prompt, opts) {
-      var body = {
-        model: model,
-        max_tokens: opts.thinking === "on" ? THINKING_BUDGET : 500,
-        messages: [{ role: "user", content: prompt }]
-      };
+      var body = chatBody(model, prompt, opts);
       // Adaptive thinking is the current form on Claude 4.6+; older models
       // (incl. the default Haiku 4.5) will reject it — the error is shown as-is.
       if (opts.thinking === "on") body.thinking = { type: "adaptive" };
-      if (opts.thinking === "off") body.thinking = { type: "disabled" };
       if (opts.effort) body.output_config = { effort: opts.effort };
       return {
         url: "https://api.anthropic.com/v1/messages",
@@ -381,13 +387,8 @@ var PROVIDERS = {
 
 // OpenAI-compatible chat/completions shape, shared by DeepSeek and Kimi.
 function openaiRequest(url, key, model, prompt, opts) {
-  var body = {
-    model: model,
-    max_tokens: opts.thinking === "on" ? THINKING_BUDGET : 500,
-    messages: [{ role: "user", content: prompt }]
-  };
+  var body = chatBody(model, prompt, opts);
   if (opts.thinking === "on") body.thinking = { type: "enabled" };
-  if (opts.thinking === "off") body.thinking = { type: "disabled" };
   if (opts.effort) body.reasoning_effort = opts.effort;
   return {
     url: url,
@@ -412,43 +413,53 @@ var KEY_DAYS = "protein.days";
 var KEY_PROVIDER = "protein.provider";
 var KEY_QUEUE = "protein.queue";
 var MAX_ATTEMPTS = 3;
+var STORAGE_FAIL = "Saving failed — storage unavailable.";
 
-// Anthropic keeps the original key name so existing installs keep working.
-function keyStorageKey(id) {
-  return id === "anthropic" ? "protein.apiKey" : "protein.apiKey." + id;
+// Per-provider settings live under "protein.<field>.<provider>". One exception:
+// Anthropic's key keeps its original name so existing installs keep working.
+function storageKey(field, id) {
+  if (field === "apiKey" && id === "anthropic") return "protein.apiKey";
+  return "protein." + field + "." + id;
 }
-function modelStorageKey(id) { return "protein.model." + id; }
-function thinkingStorageKey(id) { return "protein.thinking." + id; }
-function effortStorageKey(id) { return "protein.effort." + id; }
+
+// localStorage can be absent, full, or hold something we didn't write. Reads fall
+// back to an empty value; writes report failure so the caller can say so.
+function loadJSON(key, fallback, isValid) {
+  try {
+    var v = JSON.parse(localStorage.getItem(key));
+    return isValid(v) ? v : fallback;
+  } catch (e) { return fallback; }
+}
+function saveJSON(key, value) {
+  try { localStorage.setItem(key, JSON.stringify(value)); return true; }
+  catch (e) { return false; }
+}
+// An empty settings field means "no override" — drop the key rather than store "".
+function setOrClear(field, id, value) {
+  if (value) localStorage.setItem(storageKey(field, id), value);
+  else localStorage.removeItem(storageKey(field, id));
+}
 
 function provider() {
   var id = localStorage.getItem(KEY_PROVIDER);
   return PROVIDERS[id] ? id : DEFAULT_PROVIDER;
 }
-function apiKey(id) { return localStorage.getItem(keyStorageKey(id || provider())) || ""; }
+function apiKey(id) { return localStorage.getItem(storageKey("apiKey", id || provider())) || ""; }
 function modelFor(id) {
   id = id || provider();
-  return (localStorage.getItem(modelStorageKey(id)) || "").trim() || PROVIDERS[id].model;
+  return (localStorage.getItem(storageKey("model", id)) || "").trim() || PROVIDERS[id].model;
 }
 function optsFor(id) {
   id = id || provider();
   return {
-    thinking: localStorage.getItem(thinkingStorageKey(id)) || "",
-    effort: (localStorage.getItem(effortStorageKey(id)) || "").trim()
+    thinking: localStorage.getItem(storageKey("thinking", id)) || "",
+    effort: (localStorage.getItem(storageKey("effort", id)) || "").trim()
   };
 }
 
-function loadDays() {
-  try {
-    var raw = localStorage.getItem(KEY_DAYS);
-    var obj = raw ? JSON.parse(raw) : {};
-    return obj && typeof obj === "object" ? obj : {};
-  } catch (e) { return {}; }
-}
-function saveDays(days) {
-  try { localStorage.setItem(KEY_DAYS, JSON.stringify(days)); return true; }
-  catch (e) { return false; }
-}
+function isObject(v) { return !!v && typeof v === "object"; }
+function loadDays() { return loadJSON(KEY_DAYS, {}, isObject); }
+function saveDays(days) { return saveJSON(KEY_DAYS, days); }
 function loadGoal() {
   var g = parseInt(localStorage.getItem(KEY_GOAL), 10);
   return g > 0 ? g : 200;
@@ -458,16 +469,8 @@ function loadGoal() {
 // Every submission lands here first and is only removed once it has been parsed
 // and written into a day. One code path online and off, and nothing is lost if
 // the tab dies mid-request. Entry: {id, text, date, createdAt, attempts, error, parked}.
-function loadQueue() {
-  try {
-    var arr = JSON.parse(localStorage.getItem(KEY_QUEUE) || "[]");
-    return Array.isArray(arr) ? arr : [];
-  } catch (e) { return []; }
-}
-function saveQueue(q) {
-  try { localStorage.setItem(KEY_QUEUE, JSON.stringify(q)); return true; }
-  catch (e) { return false; }
-}
+function loadQueue() { return loadJSON(KEY_QUEUE, [], Array.isArray); }
+function saveQueue(q) { return saveJSON(KEY_QUEUE, q); }
 function updateQueue(fn) {
   var q = loadQueue();
   var next = fn(q);
@@ -544,9 +547,16 @@ var PARSE_PROMPT = [
   'Now do the same for this input: '
 ].join("\n");
 
-function apiError(msg) {
+// Every failure says how it should be retried, decided here where the cause is
+// actually known rather than re-derived later from a status code:
+//   "defer"    — never reached the provider, so it costs no attempt; wait for the
+//                next trigger (reconnect, reopen).
+//   "soft"     — worth another go later; burns an attempt.
+//   "terminal" — the provider understood us and said no; retrying asks the same
+//                question and gets the same answer.
+function apiError(msg, retry) {
   var err = new Error(msg);
-  err.isApi = true;
+  err.retry = retry;
   return err;
 }
 
@@ -564,10 +574,9 @@ async function parseFood(text) {
     });
   } catch (e) {
     // fetch only rejects on network/CORS failure, never on HTTP error status.
-    // Retryable: the request never landed, so nothing was charged or logged.
-    var netErr = apiError("Couldn't reach " + p.host + " — network error, or the provider blocks browser requests (CORS).");
-    netErr.retryable = true;
-    throw netErr;
+    // The request never landed, so nothing was charged or logged.
+    throw apiError("Couldn't reach " + p.host +
+      " — network error, or the provider blocks browser requests (CORS).", "defer");
   }
 
   var bodyText = "";
@@ -580,9 +589,11 @@ async function parseFood(text) {
     var msg = (data && data.error && (data.error.message || data.error)) ||
               (data && data.message) || bodyText || "no response body";
     if (typeof msg !== "string") msg = JSON.stringify(msg);
-    var httpErr = apiError(p.host + " HTTP " + res.status + ": " + msg);
-    httpErr.status = res.status;
-    throw httpErr;
+    // A 4xx is the provider's considered "no". Rate limits, timeouts and server
+    // errors are the ones where the same request can still succeed later.
+    var soft = res.status < 400 || res.status >= 500 ||
+               res.status === 408 || res.status === 429;
+    throw apiError(p.host + " HTTP " + res.status + ": " + msg, soft ? "soft" : "terminal");
   }
 
   var raw = p.extract(data || {});
@@ -592,18 +603,17 @@ async function parseFood(text) {
   try {
     arr = JSON.parse(clean);
   } catch (e) {
-    throw apiError("Model did not return JSON. Response: " + (clean || bodyText || "empty"));
+    throw apiError("Model did not return JSON. Response: " + (clean || bodyText || "empty"), "soft");
   }
   if (!Array.isArray(arr)) {
-    throw apiError("Expected a JSON array. Response: " + clean);
+    throw apiError("Expected a JSON array. Response: " + clean, "soft");
   }
 
   return arr
     .filter(function (x) { return x && typeof x.name === "string"; })
     .map(function (x) {
       return {
-        id: (crypto.randomUUID ? crypto.randomUUID()
-             : Math.random().toString(36).slice(2) + Date.now().toString(36)),
+        id: newId(),
         name: x.name,
         amount: String(x.amount == null ? "" : x.amount),
         protein: Math.max(0, Math.round(Number(x.protein_g) || 0))
@@ -615,7 +625,7 @@ async function parseFood(text) {
 var $ = function (id) { return document.getElementById(id); };
 var settingsEl = $("settings"), keyInput = $("api-key-input");
 var providerSelect = $("provider-select"), modelInput = $("model-input");
-var modelDefault = $("model-default"), settingsNote = $("settings-note");
+var settingsNote = $("settings-note");
 var thinkingSelect = $("thinking-select"), effortInput = $("effort-input");
 var effortOptions = $("effort-options");
 var totalEl = $("total"), goalShow = $("goal-show"), goalEdit = $("goal-edit"), goalInput = $("goal-input");
@@ -625,6 +635,24 @@ var itemsEl = $("items"), emptyMsg = $("empty-msg"), weekEl = $("week");
 var pendingEl = $("pending"), offlineNote = $("offline-note");
 
 // ---------- rendering ----------
+// The three lists below all build the same create → class → text → append shape.
+function el(tag, cls, text) {
+  var e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text != null) e.textContent = text;
+  return e;
+}
+function delButton(cls, label, onClick) {
+  var b = el("button", cls, "×");
+  b.type = "button";
+  b.setAttribute("aria-label", label);
+  b.addEventListener("click", onClick);
+  return b;
+}
+function sumProtein(items) {
+  return items.reduce(function (s, i) { return s + i.protein; }, 0);
+}
+
 function showError(msg) {
   errorEl.textContent = msg;
   errorEl.style.display = msg ? "block" : "none";
@@ -634,7 +662,7 @@ function render() {
   var days = loadDays();
   var goal = loadGoal();
   var items = days[todayKey()] || [];
-  var total = items.reduce(function (s, i) { return s + i.protein; }, 0);
+  var total = sumProtein(items);
   var hit = total >= goal;
 
   // date
@@ -655,35 +683,15 @@ function render() {
   itemsEl.innerHTML = "";
   emptyMsg.style.display = items.length ? "none" : "block";
   items.forEach(function (it) {
-    var li = document.createElement("li");
+    var left = el("div", "item-left");
+    left.appendChild(el("span", "item-name", it.name));
+    if (it.amount) left.appendChild(el("span", "item-amount", it.amount));
 
-    var left = document.createElement("div");
-    left.className = "item-left";
-    var name = document.createElement("span");
-    name.className = "item-name";
-    name.textContent = it.name;
-    left.appendChild(name);
-    if (it.amount) {
-      var amt = document.createElement("span");
-      amt.className = "item-amount";
-      amt.textContent = it.amount;
-      left.appendChild(amt);
-    }
+    var right = el("div", "item-right");
+    right.appendChild(el("span", "item-grams", it.protein + " g"));
+    right.appendChild(delButton("item-del", "Remove " + it.name, function () { removeItem(it.id); }));
 
-    var right = document.createElement("div");
-    right.className = "item-right";
-    var grams = document.createElement("span");
-    grams.className = "item-grams";
-    grams.textContent = it.protein + " g";
-    var del = document.createElement("button");
-    del.className = "item-del";
-    del.type = "button";
-    del.textContent = "×";
-    del.setAttribute("aria-label", "Remove " + it.name);
-    del.addEventListener("click", function () { removeItem(it.id); });
-    right.appendChild(grams);
-    right.appendChild(del);
-
+    var li = el("li");
     li.appendChild(left);
     li.appendChild(right);
     itemsEl.appendChild(li);
@@ -697,23 +705,16 @@ function render() {
   for (var i = 6; i >= 0; i--) {
     var d = new Date();
     d.setDate(d.getDate() - i);
-    var list = days[fmt(d)] || [];
-    var dayTotal = list.reduce(function (s, it) { return s + it.protein; }, 0);
     var isToday = i === 0;
-    var ratio = Math.min(1, dayTotal / goal);
+    var dayTotal = isToday ? total : sumProtein(days[fmt(d)] || []);
 
-    var col = document.createElement("div");
-    col.className = "day-col";
-    var bar = document.createElement("div");
-    bar.className = "day-bar" +
-      (dayTotal >= goal ? " hit-bg" : isToday ? " today" : "");
-    bar.style.height = Math.max(3, ratio * 56) + "px";
+    var bar = el("div", "day-bar" + (dayTotal >= goal ? " hit-bg" : isToday ? " today" : ""));
+    bar.style.height = Math.max(3, Math.min(1, dayTotal / goal) * 56) + "px";
     bar.title = dayTotal + " g";
-    var lab = document.createElement("span");
-    lab.className = "day-label" + (isToday ? " today" : "");
-    lab.textContent = labels[d.getDay()];
+
+    var col = el("div", "day-col");
     col.appendChild(bar);
-    col.appendChild(lab);
+    col.appendChild(el("span", "day-label" + (isToday ? " today" : ""), labels[d.getDay()]));
     weekEl.appendChild(col);
   }
 }
@@ -728,38 +729,20 @@ function renderPending() {
   offlineNote.style.display = (!navigator.onLine && q.length) ? "block" : "none";
 
   q.forEach(function (e) {
-    var li = document.createElement("li");
-    if (e.parked) li.className = "failed";
+    var left = el("div", "pend-left");
+    left.appendChild(el("div", "pend-text", e.text));
+    left.appendChild(el("div", "pend-meta", pendingStatus(e)));
 
-    var left = document.createElement("div");
-    left.className = "pend-left";
-    var txt = document.createElement("div");
-    txt.className = "pend-text";
-    txt.textContent = e.text;
-    var meta = document.createElement("div");
-    meta.className = "pend-meta";
-    meta.textContent = pendingStatus(e);
-    left.appendChild(txt);
-    left.appendChild(meta);
-
-    var right = document.createElement("div");
-    right.className = "pend-right";
+    var right = el("div", "pend-right");
     if (e.parked) {
-      var retry = document.createElement("button");
-      retry.className = "pend-retry";
+      var retry = el("button", "pend-retry", "Retry");
       retry.type = "button";
-      retry.textContent = "Retry";
       retry.addEventListener("click", function () { retryPending(e.id); });
       right.appendChild(retry);
     }
-    var del = document.createElement("button");
-    del.className = "pend-del";
-    del.type = "button";
-    del.textContent = "×";
-    del.setAttribute("aria-label", "Discard " + e.text);
-    del.addEventListener("click", function () { dropPending(e.id); });
-    right.appendChild(del);
+    right.appendChild(delButton("pend-del", "Discard " + e.text, function () { dropPending(e.id); }));
 
+    var li = el("li", e.parked ? "failed" : "");
     li.appendChild(left);
     li.appendChild(right);
     pendingEl.appendChild(li);
@@ -781,7 +764,7 @@ function removeItem(id) {
   var days = loadDays();
   var key = todayKey();
   days[key] = (days[key] || []).filter(function (i) { return i.id !== id; });
-  if (!saveDays(days)) showError("Saving failed — storage unavailable.");
+  if (!saveDays(days)) showError(STORAGE_FAIL);
   render();
 }
 
@@ -803,7 +786,7 @@ function log() {
     });
     return q;
   });
-  if (!ok) { showError("Saving failed — storage unavailable."); return; }
+  if (!ok) { showError(STORAGE_FAIL); return; }
 
   foodInput.value = "";
   showError("");
@@ -819,12 +802,7 @@ function log() {
 }
 
 function retryPending(id) {
-  updateQueue(function (q) {
-    q.forEach(function (e) {
-      if (e.id === id) { e.parked = false; e.attempts = 0; e.error = ""; }
-    });
-    return q;
-  });
+  patchEntry(id, { parked: false, attempts: 0, error: "" });
   render();
   drain();
 }
@@ -836,19 +814,15 @@ function dropPending(id) {
   render();
 }
 
+// Returns false if the write didn't land. Callers must stop rather than carry on
+// against an entry whose state could not be recorded.
 function patchEntry(id, patch) {
-  updateQueue(function (q) {
+  var ok = updateQueue(function (q) {
     q.forEach(function (e) { if (e.id === id) Object.assign(e, patch); });
     return q;
   });
-}
-
-// A 4xx means the provider understood us and said no — retrying sends the same
-// request to the same answer. Rate limits and overload are the exceptions.
-function isTerminal(err) {
-  var s = err && err.status;
-  if (!s || s < 400 || s >= 500) return false;
-  return s !== 408 && s !== 429;
+  if (!ok) showError(STORAGE_FAIL);
+  return ok;
 }
 
 var draining = false;
@@ -860,6 +834,7 @@ async function drain() {
   if (draining) return;
   if (!apiKey()) return;
   draining = true;
+  var didWork = false;
   // Backstop: if an entry comes round twice in one pass, its state failed to
   // persist (storage full) and retrying it would spin forever.
   var seen = {};
@@ -869,6 +844,7 @@ async function drain() {
       var next = loadQueue().filter(function (e) { return !e.parked; })[0];
       if (!next || seen[next.id]) break;
       seen[next.id] = true;
+      didWork = true;
 
       activeId = next.id;
       render();
@@ -884,40 +860,41 @@ async function drain() {
       if (!loadQueue().some(function (e) { return e.id === next.id; })) continue;
 
       if (!failure) {
-        if (parsed.length) {
-          var days = loadDays();
-          days[next.date] = (days[next.date] || []).concat(parsed);
-          if (!saveDays(days)) {
-            // Leave it queued rather than dropping a parse we already paid for.
-            patchEntry(next.id, { error: "Saving failed — storage unavailable.", parked: true });
-            continue;
-          }
-        } else {
-          patchEntry(next.id, { error: "No food recognized — edit and retry.", parked: true });
+        if (!parsed.length) {
+          if (!patchEntry(next.id, { error: "No food recognized — edit and retry.", parked: true })) break;
+          continue;
+        }
+        var days = loadDays();
+        days[next.date] = (days[next.date] || []).concat(parsed);
+        if (!saveDays(days)) {
+          // Leave it queued rather than dropping a parse we already paid for.
+          if (!patchEntry(next.id, { error: STORAGE_FAIL, parked: true })) break;
           continue;
         }
         dropPending(next.id);
         continue;
       }
 
-      var msg = (failure && failure.message) || "Couldn't parse that — try rephrasing.";
+      var msg = failure.message || "Couldn't parse that — try rephrasing.";
 
-      // Never reached the provider: not the entry's fault, so don't burn an
-      // attempt. Stop the whole drain and wait for the next trigger.
-      if (failure.retryable) {
+      // "defer": the request never reached the provider, so it is not the entry's
+      // fault and costs no attempt. Stop and wait for the next trigger.
+      if (failure.retry === "defer") {
         patchEntry(next.id, { error: msg });
         break;
       }
 
       var attempts = (next.attempts || 0) + 1;
-      var park = isTerminal(failure) || attempts >= MAX_ATTEMPTS;
-      patchEntry(next.id, { attempts: attempts, error: msg, parked: park });
-      if (!park) break;  // transient — try again on the next trigger, not in a tight loop
+      var parked = failure.retry === "terminal" || attempts >= MAX_ATTEMPTS;
+      if (!patchEntry(next.id, { attempts: attempts, error: msg, parked: parked })) break;
+      if (!parked) break;  // transient — try again on the next trigger, not in a tight loop
     }
   } finally {
     draining = false;
     activeId = null;
-    render();
+    // Nothing changed if the queue was already empty, and a render there would
+    // rebuild what is already on screen.
+    if (didWork) render();
   }
 }
 
@@ -943,9 +920,8 @@ function syncSettings() {
   var p = PROVIDERS[id];
   keyInput.value = apiKey(id);
   keyInput.placeholder = p.keyHint;
-  modelInput.value = localStorage.getItem(modelStorageKey(id)) || "";
+  modelInput.value = localStorage.getItem(storageKey("model", id)) || "";
   modelInput.placeholder = p.model;
-  modelDefault.textContent = "(optional)";
   var o = optsFor(id);
   thinkingSelect.value = o.thinking;
   effortInput.value = o.effort;
@@ -990,13 +966,10 @@ function saveSettings() {
   var effort = effortInput.value.trim();
   try {
     localStorage.setItem(KEY_PROVIDER, id);
-    if (key) localStorage.setItem(keyStorageKey(id), key);
-    if (model) localStorage.setItem(modelStorageKey(id), model);
-    else localStorage.removeItem(modelStorageKey(id));
-    if (thinking) localStorage.setItem(thinkingStorageKey(id), thinking);
-    else localStorage.removeItem(thinkingStorageKey(id));
-    if (effort) localStorage.setItem(effortStorageKey(id), effort);
-    else localStorage.removeItem(effortStorageKey(id));
+    if (key) localStorage.setItem(storageKey("apiKey", id), key);
+    setOrClear("model", id, model);
+    setOrClear("thinking", id, thinking);
+    setOrClear("effort", id, effort);
   } catch (e) {}
   if (!apiKey(id)) { keyInput.focus(); showError("Add your API key first."); return; }
   settingsEl.classList.remove("open");

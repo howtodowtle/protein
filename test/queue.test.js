@@ -1,7 +1,6 @@
 // Regression tests for the offline queue state machine in index.html.
 // Zero dependencies: `node test/queue.test.js`. Runs the real inline script
 // under a minimal DOM shim rather than re-implementing it.
-// machine can be exercised for real (not re-implemented).
 const fs = require("fs");
 const vm = require("vm");
 
@@ -77,8 +76,10 @@ const httpErr = (status, msg) => ({
 const netFail = () => { throw new TypeError("Failed to fetch"); };
 
 const settle = () => new Promise((r) => setTimeout(r, 30));
-const q = (h) => JSON.parse(h.store["protein.queue"] || "[]");
-const days = (h) => JSON.parse(h.store["protein.days"] || "{}");
+// Read through the app's own key constants: a rename in index.html must break
+// these loudly, not silently make them read an absent key and pass.
+const q = (h) => JSON.parse(h.store[h.ctx.KEY_QUEUE] || "[]");
+const days = (h) => JSON.parse(h.store[h.ctx.KEY_DAYS] || "{}");
 
 let pass = 0, fail = 0;
 function check(name, cond, extra) {
@@ -200,7 +201,7 @@ const baseStore = () => ({ "protein.apiKey": "sk-test", "protein.provider": "ant
     // Rewrite the stamp to yesterday, then let it succeed: it must land on yesterday.
     const st = q(h);
     st[0].date = "2020-01-01";
-    h.store["protein.queue"] = JSON.stringify(st);
+    h.store[h.ctx.KEY_QUEUE] = JSON.stringify(st);
     h.ctx.navigator.onLine = true;
     h.ctx.fetch = async () => ok([{ name: "Snack", amount: "1", protein_g: 5 }]);
     h.windowListeners.online.forEach((f) => f());

@@ -113,6 +113,33 @@
     user-select: text; -webkit-user-select: text;
   }
 
+  /* Pending queue — entries captured but not yet parsed */
+  #pending { list-style: none; margin-top: 12px; }
+  #pending li {
+    display: flex; align-items: flex-start; justify-content: space-between;
+    gap: 12px; padding: 10px 12px; margin-top: 8px;
+    border: 2px dashed #bdbdbd;
+  }
+  #pending li.failed { border-style: solid; border-color: #b3261e; }
+  .pend-left { min-width: 0; flex: 1; }
+  .pend-text { font-weight: 700; overflow-wrap: anywhere; }
+  .pend-meta {
+    margin-top: 4px; font-size: 13px; color: #6b6b6b; line-height: 1.35;
+    overflow-wrap: anywhere; white-space: pre-wrap;
+    user-select: text; -webkit-user-select: text;
+  }
+  #pending li.failed .pend-meta { color: #b3261e; font-weight: 700; }
+  .pend-right { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+  .pend-retry {
+    background: none; border: 2px solid #111; font: inherit; font-size: 13px;
+    font-weight: 700; padding: 4px 8px; cursor: pointer;
+  }
+  .pend-del {
+    background: none; border: none; font: inherit; font-size: 18px;
+    line-height: 1; padding: 0 2px; color: #6b6b6b; cursor: pointer;
+  }
+  #offline-note { margin-top: 8px; font-size: 13px; color: #6b6b6b; display: none; }
+
   /* Items */
   .items-section { margin-top: 24px; }
   #empty-msg { padding: 16px 0; font-size: 14px; color: #6b6b6b; }
@@ -217,6 +244,8 @@
       <button id="log-btn" type="button">Log it</button>
     </div>
     <p id="error"></p>
+    <p id="offline-note">Offline — queued entries send when you're back online.</p>
+    <ul id="pending"></ul>
   </section>
 
   <section class="items-section">
@@ -381,6 +410,8 @@ var DEFAULT_PROVIDER = "anthropic";
 var KEY_GOAL = "protein.goal";
 var KEY_DAYS = "protein.days";
 var KEY_PROVIDER = "protein.provider";
+var KEY_QUEUE = "protein.queue";
+var MAX_ATTEMPTS = 3;
 
 // Anthropic keeps the original key name so existing installs keep working.
 function keyStorageKey(id) {
@@ -421,6 +452,30 @@ function saveDays(days) {
 function loadGoal() {
   var g = parseInt(localStorage.getItem(KEY_GOAL), 10);
   return g > 0 ? g : 200;
+}
+
+// ---------- queue ----------
+// Every submission lands here first and is only removed once it has been parsed
+// and written into a day. One code path online and off, and nothing is lost if
+// the tab dies mid-request. Entry: {id, text, date, createdAt, attempts, error, parked}.
+function loadQueue() {
+  try {
+    var arr = JSON.parse(localStorage.getItem(KEY_QUEUE) || "[]");
+    return Array.isArray(arr) ? arr : [];
+  } catch (e) { return []; }
+}
+function saveQueue(q) {
+  try { localStorage.setItem(KEY_QUEUE, JSON.stringify(q)); return true; }
+  catch (e) { return false; }
+}
+function updateQueue(fn) {
+  var q = loadQueue();
+  var next = fn(q);
+  return saveQueue(next || q);
+}
+function newId() {
+  return crypto.randomUUID ? crypto.randomUUID()
+    : Math.random().toString(36).slice(2) + Date.now().toString(36);
 }
 
 // ---------- dates ----------
@@ -508,8 +563,11 @@ async function parseFood(text) {
       body: JSON.stringify(req.body)
     });
   } catch (e) {
-    // fetch only rejects on network/CORS failure, never on HTTP error status
-    throw apiError("Couldn't reach " + p.host + " — network error, or the provider blocks browser requests (CORS).");
+    // fetch only rejects on network/CORS failure, never on HTTP error status.
+    // Retryable: the request never landed, so nothing was charged or logged.
+    var netErr = apiError("Couldn't reach " + p.host + " — network error, or the provider blocks browser requests (CORS).");
+    netErr.retryable = true;
+    throw netErr;
   }
 
   var bodyText = "";
@@ -522,7 +580,9 @@ async function parseFood(text) {
     var msg = (data && data.error && (data.error.message || data.error)) ||
               (data && data.message) || bodyText || "no response body";
     if (typeof msg !== "string") msg = JSON.stringify(msg);
-    throw apiError(p.host + " HTTP " + res.status + ": " + msg);
+    var httpErr = apiError(p.host + " HTTP " + res.status + ": " + msg);
+    httpErr.status = res.status;
+    throw httpErr;
   }
 
   var raw = p.extract(data || {});
@@ -562,6 +622,7 @@ var totalEl = $("total"), goalShow = $("goal-show"), goalEdit = $("goal-edit"), 
 var barFill = $("bar-fill"), goalMsg = $("goal-msg");
 var foodInput = $("food-input"), logBtn = $("log-btn"), errorEl = $("error");
 var itemsEl = $("items"), emptyMsg = $("empty-msg"), weekEl = $("week");
+var pendingEl = $("pending"), offlineNote = $("offline-note");
 
 // ---------- rendering ----------
 function showError(msg) {
@@ -628,6 +689,8 @@ function render() {
     itemsEl.appendChild(li);
   });
 
+  renderPending();
+
   // week chart
   weekEl.innerHTML = "";
   var labels = ["S", "M", "T", "W", "T", "F", "S"];
@@ -655,6 +718,64 @@ function render() {
   }
 }
 
+// Pending entries live outside the day totals: their protein is unknown until
+// parsed, so counting them would make the headline number lie. They are listed
+// separately, and carry their own date because an entry queued last night must
+// land on last night's day even if it only sends this morning.
+function renderPending() {
+  var q = loadQueue();
+  pendingEl.innerHTML = "";
+  offlineNote.style.display = (!navigator.onLine && q.length) ? "block" : "none";
+
+  q.forEach(function (e) {
+    var li = document.createElement("li");
+    if (e.parked) li.className = "failed";
+
+    var left = document.createElement("div");
+    left.className = "pend-left";
+    var txt = document.createElement("div");
+    txt.className = "pend-text";
+    txt.textContent = e.text;
+    var meta = document.createElement("div");
+    meta.className = "pend-meta";
+    meta.textContent = pendingStatus(e);
+    left.appendChild(txt);
+    left.appendChild(meta);
+
+    var right = document.createElement("div");
+    right.className = "pend-right";
+    if (e.parked) {
+      var retry = document.createElement("button");
+      retry.className = "pend-retry";
+      retry.type = "button";
+      retry.textContent = "Retry";
+      retry.addEventListener("click", function () { retryPending(e.id); });
+      right.appendChild(retry);
+    }
+    var del = document.createElement("button");
+    del.className = "pend-del";
+    del.type = "button";
+    del.textContent = "×";
+    del.setAttribute("aria-label", "Discard " + e.text);
+    del.addEventListener("click", function () { dropPending(e.id); });
+    right.appendChild(del);
+
+    li.appendChild(left);
+    li.appendChild(right);
+    pendingEl.appendChild(li);
+  });
+}
+
+function pendingStatus(e) {
+  var day = e.date === todayKey() ? "" : " · for " + e.date;
+  if (e.id === activeId) return "estimating…" + day;
+  if (e.parked) return e.error || "Failed.";
+  if (!apiKey()) return "waiting for an API key" + day;
+  if (!navigator.onLine) return "waiting for a connection" + day;
+  if (e.error) return e.error + "\nWill retry.";
+  return "pending" + day;
+}
+
 // ---------- actions ----------
 function removeItem(id) {
   var days = loadDays();
@@ -664,41 +785,140 @@ function removeItem(id) {
   render();
 }
 
-async function log() {
+// Enqueue first, then try to send. Not "send, and queue on failure" — this way
+// there is one path online and off, and a crash mid-request loses nothing.
+function log() {
   var text = foodInput.value.trim();
-  if (!text || logBtn.disabled) return;
+  if (!text) return;
+
+  var ok = updateQueue(function (q) {
+    q.push({
+      id: newId(),
+      text: text,
+      date: todayKey(),   // stamped now: a late send must not slide into the next day
+      createdAt: new Date().toISOString(),
+      attempts: 0,
+      error: "",
+      parked: false
+    });
+    return q;
+  });
+  if (!ok) { showError("Saving failed — storage unavailable."); return; }
+
+  foodInput.value = "";
+  showError("");
+  render();
+  foodInput.focus();
 
   if (!apiKey()) {
     openSettings();
-    showError("Add your API key first.");
+    showError("Add your API key — the entry is saved and will send once you do.");
     return;
   }
+  drain();
+}
 
-  logBtn.disabled = true;
-  foodInput.disabled = true;
-  logBtn.textContent = "Estimating…";
-  showError("");
+function retryPending(id) {
+  updateQueue(function (q) {
+    q.forEach(function (e) {
+      if (e.id === id) { e.parked = false; e.attempts = 0; e.error = ""; }
+    });
+    return q;
+  });
+  render();
+  drain();
+}
+
+function dropPending(id) {
+  updateQueue(function (q) {
+    return q.filter(function (e) { return e.id !== id; });
+  });
+  render();
+}
+
+function patchEntry(id, patch) {
+  updateQueue(function (q) {
+    q.forEach(function (e) { if (e.id === id) Object.assign(e, patch); });
+    return q;
+  });
+}
+
+// A 4xx means the provider understood us and said no — retrying sends the same
+// request to the same answer. Rate limits and overload are the exceptions.
+function isTerminal(err) {
+  var s = err && err.status;
+  if (!s || s < 400 || s >= 500) return false;
+  return s !== 408 && s !== 429;
+}
+
+var draining = false;
+var activeId = null;
+
+// Works through the queue oldest-first, one at a time — keeps day-log order and
+// avoids firing every queued request the instant a flaky connection returns.
+async function drain() {
+  if (draining) return;
+  if (!apiKey()) return;
+  draining = true;
+  // Backstop: if an entry comes round twice in one pass, its state failed to
+  // persist (storage full) and retrying it would spin forever.
+  var seen = {};
 
   try {
-    var parsed = await parseFood(text);
-    if (parsed.length === 0) {
-      showError("No food recognized — try rephrasing.");
-    } else {
-      var days = loadDays();
-      var key = todayKey();
-      days[key] = (days[key] || []).concat(parsed);
-      if (!saveDays(days)) showError("Saving failed — storage unavailable.");
-      foodInput.value = "";
-    }
-  } catch (e) {
-    showError((e && e.message) || "Couldn't parse that — try rephrasing.");
-  }
+    while (true) {
+      var next = loadQueue().filter(function (e) { return !e.parked; })[0];
+      if (!next || seen[next.id]) break;
+      seen[next.id] = true;
 
-  logBtn.disabled = false;
-  foodInput.disabled = false;
-  logBtn.textContent = "Log it";
-  render();
-  foodInput.focus();
+      activeId = next.id;
+      render();
+
+      var parsed = null, failure = null;
+      try {
+        parsed = await parseFood(next.text);
+      } catch (err) {
+        failure = err;
+      }
+
+      // The entry may have been discarded while the request was in flight.
+      if (!loadQueue().some(function (e) { return e.id === next.id; })) continue;
+
+      if (!failure) {
+        if (parsed.length) {
+          var days = loadDays();
+          days[next.date] = (days[next.date] || []).concat(parsed);
+          if (!saveDays(days)) {
+            // Leave it queued rather than dropping a parse we already paid for.
+            patchEntry(next.id, { error: "Saving failed — storage unavailable.", parked: true });
+            continue;
+          }
+        } else {
+          patchEntry(next.id, { error: "No food recognized — edit and retry.", parked: true });
+          continue;
+        }
+        dropPending(next.id);
+        continue;
+      }
+
+      var msg = (failure && failure.message) || "Couldn't parse that — try rephrasing.";
+
+      // Never reached the provider: not the entry's fault, so don't burn an
+      // attempt. Stop the whole drain and wait for the next trigger.
+      if (failure.retryable) {
+        patchEntry(next.id, { error: msg });
+        break;
+      }
+
+      var attempts = (next.attempts || 0) + 1;
+      var park = isTerminal(failure) || attempts >= MAX_ATTEMPTS;
+      patchEntry(next.id, { attempts: attempts, error: msg, parked: park });
+      if (!park) break;  // transient — try again on the next trigger, not in a tight loop
+    }
+  } finally {
+    draining = false;
+    activeId = null;
+    render();
+  }
 }
 
 // ---------- wiring ----------
@@ -782,6 +1002,7 @@ function saveSettings() {
   settingsEl.classList.remove("open");
   showError("");
   foodInput.focus();
+  drain();  // a fresh key or model may be exactly what the queue was waiting for
 }
 
 goalShow.addEventListener("click", function () {
@@ -806,14 +1027,22 @@ providerSelect.value = provider();
 syncSettings();
 if (!apiKey()) settingsEl.classList.add("open");
 render();
+drain();
 
-// re-render at midnight rollover / when tab regains focus
+// Drain triggers. iOS Safari has no Background Sync, so a queued entry can only
+// be sent while the app is actually open — reopening it is the trigger that
+// matters in practice.
 document.addEventListener("visibilitychange", function () {
-  if (!document.hidden) render();
+  // also re-renders at midnight rollover
+  if (!document.hidden) { render(); drain(); }
 });
+window.addEventListener("online", function () { render(); drain(); });
+// navigator.onLine only ever tells the truth when false (a captive portal still
+// reports "online"), so it gates the note, never the drain — drain just tries.
+window.addEventListener("offline", render);
 
 // Service worker: caches the shell so the installed app opens without network.
-// Parsing still needs the API — offline you can read the log, not add to it.
+// Parsing still needs the API — offline you can capture entries, not resolve them.
 if ("serviceWorker" in navigator && location.protocol.indexOf("http") === 0) {
   window.addEventListener("load", function () {
     navigator.serviceWorker.register("./sw.js").catch(function () {});

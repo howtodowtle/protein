@@ -183,7 +183,29 @@
   .items-head { padding-top: 12px; }  /* flex layout comes from .header-row */
   #empty-msg { padding: 16px 0; font-size: 14px; color: #6b6b6b; }
   #items { list-style: none; }
-  #items li { display: flex; align-items: baseline; border-bottom: 1px solid #dcdcdc; }
+  /* How much of the number the model had to guess, drawn as how much of the
+     row's own rule it earned: the solid part is what the text pinned down, the
+     dotted remainder is what was estimated. The rule stays full length either
+     way, so the list keeps its rhythm and only its texture changes — a sure row
+     is the plain rule it always was, an unrated one is dotted end to end. */
+  #items li {
+    display: flex; align-items: baseline; position: relative;
+    border-bottom: 0.5px dotted #dcdcdc;
+  }
+  /* The solid part is drawn over the dots rather than instead of them, at three
+     times their weight: matched weights are a difference you have to look for,
+     and this is meant to be read while scanning past. It stays an overlay so the
+     border — and with it the row's height — is the same on every row. Only the
+     length is per word, so a word added to CERTAINTY later still draws — at the
+     least sure length, until someone gives it one — rather than silently reading
+     as fully certain while the sort treats it as a guess. */
+  #items li::after {
+    content: ""; position: absolute; bottom: -0.5px; left: 0;
+    height: 1.5px; width: 33%; background: #dcdcdc;
+  }
+  #items li.cert-medium::after { width: 66%; }
+  #items li.cert-high::after { width: 100%; }
+  #items li.cert-unrated::after { width: 0; }
   /* The row's height lives on its tappable parts, not on the li, so the whole
      height of a row opens the editor rather than only the band of text across
      its middle. Baseline alignment means this renders as it did before. One
@@ -201,31 +223,23 @@
     background: none; border: none; cursor: pointer; font-size: 18px;
     line-height: 1; padding: 0 4px; color: #6b6b6b;
   }
-  /* How much of the number the model had to guess. A row it was sure about is
-     drawn exactly as it always was — the mark is ink spent only where there is
-     something worth checking. It thickens a short stretch of the row's own
-     rule, so it belongs to the type; the further left it sits the less sure the
-     row, and stacked rows put the least sure ones in a column down the margin. */
-  #items li.cert { position: relative; }
-  #items li.cert::after {
-    content: ""; position: absolute; bottom: -2px; left: 0;
-    height: 3px; width: 18px; background: #111;
-  }
-  /* The mark itself hangs off the plain .cert class, and only the offset is per
-     word. A word added to CERTAINTY later is then still marked — at the least
-     sure position, until someone gives it one — rather than silently drawing
-     nothing while the sort and the hint both go on treating it as a guess. */
-  #items li.cert-medium::after { left: 26px; }
 
   /* Correcting an estimate: the row turns into its own fields, in place.
      The fields wear the shared input box above; only the layout differs. */
-  #items li.editing { display: block; }
+  /* The row being corrected drops its certainty rule: the button inside it is
+     the live answer, and a stale second reading of the same thing an inch away
+     would only argue with it. */
+  #items li.editing { display: block; border-bottom-style: solid; }
+  #items li.editing::after { content: none; }
   .edit-name { display: block; width: 100%; font-weight: 700; }
   /* Wrapping is the escape hatch for a narrow phone: rather than squeezing the
      amount field down to a sliver, the buttons drop to their own line. */
   .edit-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; }
   .edit-amount { min-width: 6rem; }
   .edit-grams { flex: none; width: 76px; text-align: right; }
+  /* Sits with the number it describes; the actions are pushed to the far end so
+     the row reads as "what it is" then "what to do about it". */
+  .cert-btn { margin-right: auto; }
 
   /* Week chart */
   .week-section { margin-top: 32px; }
@@ -560,16 +574,21 @@ function loadSort() {
 }
 
 // How much of an item's number the model had to guess. Sure first, so the index
-// doubles as the rank. Only these three words mean anything: a word we don't
-// know, and an item saved before the field existed, both rank as sure and so
-// draw no mark — silence is the safe default, and the alternative would flag
-// every item ever logged. An array, not an object, so a name like "constructor"
-// cannot come back as a match.
-var CERTAINTY = ["high", "medium", "low"];
-function certRank(v) {
-  var i = CERTAINTY.indexOf(v);
-  return i < 0 ? 0 : i;
-}
+// doubles as the rank — shifted by one to leave 0 for "said nothing", which is
+// its own thing and not a synonym for sure: an item saved before the field
+// existed makes no claim either way, so it sorts below even the sure ones
+// rather than jumping the queue of things actually worth checking. Only these
+// three words mean anything, and an array rather than an object means a name
+// like "constructor" cannot come back as a match.
+// One object again holds the words, the order the editor's button cycles them
+// and how each reads to a human, so a fourth grade is one line and there is no
+// second list to forget. "unrated" is deliberately absent: it is what the model
+// failing to answer looks like, not something a person would choose.
+// All three are the same word bent, so which outranks which needs no learning —
+// and it is the word the sort control above already uses.
+var CERT_LABELS = { high: "sure", medium: "fairly sure", low: "not sure" };
+var CERTAINTY = Object.keys(CERT_LABELS);
+function certRank(v) { return CERTAINTY.indexOf(v) + 1; }
 
 // ---------- queue ----------
 // Every submission lands here first and is only removed once it has been parsed
@@ -823,11 +842,11 @@ function render() {
   itemsEl.innerHTML = "";
   emptyMsg.style.display = items.length ? "none" : "block";
   itemsHint.style.display = items.length ? "block" : "none";
-  // A mark nobody can read is decoration, so the hint explains itself the moment
-  // there is a mark to explain — and goes back to the plain instruction once the
-  // last guess has been corrected away.
-  itemsHint.textContent = items.some(function (i) { return certRank(i.certainty); })
-    ? "Marked items were partly guessed — tap one to fix it."
+  // A rule nobody can read is decoration, so the hint explains itself the moment
+  // a row is drawn as anything but certain — and goes back to the plain
+  // instruction once the last of them has been corrected away.
+  itemsHint.textContent = items.some(function (i) { return i.certainty !== "high"; })
+    ? "Dotted means less certain — tap to fix."
     : "Tap an item to fix its name, amount or grams.";
   // One item cannot be out of order, so the control only earns its space at two.
   itemsHead.style.display = items.length > 1 ? "flex" : "none";
@@ -851,8 +870,9 @@ function render() {
     right.appendChild(grams);
     right.appendChild(delButton("item-del", "Remove " + it.name, function () { removeItem(it.id); }));
 
-    // Rank 0 is "sure", and also "said nothing": neither earns a mark.
-    var li = el("li", certRank(it.certainty) ? "cert cert-" + it.certainty : "");
+    // Every row is drawn, including the ones that said nothing — an item with
+    // no answer is dotted end to end, which is what "no answer" looks like.
+    var li = el("li", "cert-" + (it.certainty || "unrated"));
     li.appendChild(left);
     li.appendChild(right);
     var edit = function () { startEdit(it.id); };
@@ -915,6 +935,18 @@ function editRow(it) {
   grams.setAttribute("inputmode", "numeric");
   grams.setAttribute("aria-label", "Grams of protein");
 
+  // How sure the row is, next to the number it describes, cycling on tap like
+  // the sort control above. An item the model made no claim about opens as
+  // certain: a person who went in and saved the row has looked at it.
+  var cert = CERTAINTY.indexOf(it.certainty) < 0 ? CERTAINTY[0] : it.certainty;
+  var certBtn = el("button", "link-btn cert-btn", CERT_LABELS[cert]);
+  certBtn.type = "button";
+  certBtn.setAttribute("aria-label", "How sure this is. Tap to change.");
+  certBtn.addEventListener("click", function () {
+    cert = CERTAINTY[(CERTAINTY.indexOf(cert) + 1) % CERTAINTY.length];
+    certBtn.textContent = CERT_LABELS[cert];
+  });
+
   var save = el("button", "btn-solid", "Save");
   save.type = "button";
   var cancel = el("button", "link-btn", "cancel");
@@ -927,7 +959,8 @@ function editRow(it) {
     updateItem(it.id, {
       name: n,
       amount: amount.value.trim(),
-      protein: Math.max(0, Math.round(Number(grams.value) || 0))
+      protein: Math.max(0, Math.round(Number(grams.value) || 0)),
+      certainty: cert
     });
   }
   save.addEventListener("click", commit);
@@ -936,6 +969,7 @@ function editRow(it) {
   var row = el("div", "edit-row");
   row.appendChild(amount);
   row.appendChild(grams);
+  row.appendChild(certBtn);
   row.appendChild(save);
   row.appendChild(cancel);
 
@@ -1017,8 +1051,7 @@ function stopEdit() {
   render();
 }
 
-// The estimate is a guess; the user's correction is not. Edits are local only —
-// nothing is re-sent to the model.
+// Edits are local only — nothing is re-sent to the model.
 function updateItem(id, fields) {
   var days = loadDays();
   var key = todayKey();
@@ -1027,13 +1060,7 @@ function updateItem(id, fields) {
     // added later survives a correction whether or not anyone remembered this
     // line. Rebuilding would delete it — and silently, since the row the user
     // just fixed is the one it would be deleted from.
-    // The certainty is set because a number you typed yourself is not a guess:
-    // correcting a row clears its mark, so the list of things to check empties.
-    return i.id === id
-      ? Object.assign({}, i, {
-          name: fields.name, amount: fields.amount, protein: fields.protein, certainty: "high"
-        })
-      : i;
+    return i.id === id ? Object.assign({}, i, fields) : i;
   });
   if (!saveDays(days)) showError(STORAGE_FAIL);
   stopEdit();

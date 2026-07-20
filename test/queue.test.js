@@ -105,6 +105,11 @@ const days = (h) => JSON.parse(h.store[h.ctx.KEY_DAYS] || "{}");
 // The rendered list, top to bottom: the names, and the class each row carries.
 const shown = (h) => h.els["items"].children.map((li) => li.children[0].children[0].textContent);
 const marks = (h) => h.els["items"].children.map((li) => li.className);
+// The open editor's row, and its controls found by what they say rather than
+// where they sit, so adding one does not renumber every test that touches it.
+const editRow = (h) => h.els["items"].children.find((li) => /editing/.test(li.className)).children[1];
+const ctl = (row, label) => row.children.find((c) => c.textContent === label);
+const certBtn = (row) => row.children.find((c) => /cert-btn/.test(c.className));
 
 let pass = 0, fail = 0;
 function check(name, cond, extra) {
@@ -317,13 +322,13 @@ const baseStore = () => ({ "protein.apiKey": "sk-test", "protein.provider": "ant
     h.ctx.startEdit(before.id);
     const li = h.els["items"].children[0];
     const [name, row] = li.children;
-    const [amount, grams, save] = row.children;
+    const [amount, grams] = row.children;
     check("fields prefilled from the item", name.value === "Eggs" && grams.value === 25, [name.value, grams.value]);
 
     name.value = "  Fried eggs  ";
     amount.value = "4 large";
     grams.value = "31.6";
-    save.click();
+    ctl(row, "Save").click();
 
     const after = Object.values(days(h))[0][0];
     check("name trimmed and saved", after.name === "Fried eggs", after);
@@ -347,14 +352,14 @@ const baseStore = () => ({ "protein.apiKey": "sk-test", "protein.provider": "ant
     h.ctx.startEdit(id);
     let [name, row] = h.els["items"].children[0].children;
     name.value = "   ";
-    row.children[2].click();
+    ctl(row, "Save").click();
     check("blank name not saved", Object.values(days(h))[0][0].name === "Quark", days(h));
     check("still editing", h.ctx.editingId === id, h.ctx.editingId);
 
     // cancel: the typed draft is thrown away, the stored item is untouched
     [name, row] = h.els["items"].children[0].children;
     name.value = "Skyr";
-    row.children[3].click();
+    ctl(row, "cancel").click();
     check("cancel discards the draft", Object.values(days(h))[0][0].name === "Quark", days(h));
     check("edit mode closed", h.ctx.editingId === null, h.ctx.editingId);
   }
@@ -439,36 +444,61 @@ const baseStore = () => ({ "protein.apiKey": "sk-test", "protein.provider": "ant
     h.els["log-btn"].click();
     await settle();
 
+    const id = (name) => stored(h).find((i) => i.name === name).id;
+    const cert = (name) => stored(h).find((i) => i.name === name).certainty;
+
     // One assertion over the whole fixture, so adding a case to it cannot leave
     // a hand-picked index quietly checking the wrong row.
     check("known words kept verbatim, unknown collapses to no claim",
       stored(h).map((i) => i.certainty).join() === "high,low,medium,", stored(h));
-    // Equal ranks keep newest-first order, so the two unranked ones stay reversed.
-    check("least sure first", shown(h).join() === "Camembert,Bread,Mystery,Quark", shown(h));
-    check("only the unsure are marked", marks(h).join() === "cert cert-low,cert cert-medium,,", marks(h));
-    check("hint explains the marks", /Marked items/.test(h.els["items-hint"].textContent), h.els["items-hint"].textContent);
+    // Least sure first, and the one that made no claim last of all — below even
+    // the sure ones, since it is not a thing the user was asked to check.
+    check("least sure first, no claim last", shown(h).join() === "Camembert,Bread,Quark,Mystery", shown(h));
+    check("every row drawn, unrated included", marks(h).join() === "cert-low,cert-medium,cert-high,cert-unrated", marks(h));
+    check("hint explains the dotting", /Dotted/.test(h.els["items-hint"].textContent), h.els["items-hint"].textContent);
 
-    // Correcting a row is the user vouching for the number: the mark goes.
-    h.ctx.startEdit(stored(h).find((i) => i.name === "Camembert").id);
-    const row = h.els["items"].children[0].children[1];
+    // Saving is not a claim about the number: the editor carries the row's own
+    // certainty across untouched, and the button is the only thing that sets it.
+    h.ctx.startEdit(id("Camembert"));
+    const row = editRow(h);
+    check("editor opens on the stored certainty", certBtn(row).textContent === "not sure", certBtn(row).textContent);
     row.children[1].value = "14";
-    row.children[2].click();
-    check("correction clears the mark", stored(h).find((i) => i.name === "Camembert").certainty === "high", stored(h));
-    check("and it sorts as sure", shown(h).join() === "Bread,Mystery,Camembert,Quark", shown(h));
+    ctl(row, "Save").click();
+    check("grams corrected", stored(h).find((i) => i.name === "Camembert").protein === 14, stored(h));
+    check("certainty untouched by the edit", cert("Camembert") === "low", stored(h));
 
-    // Once the last guess is corrected away, the hint goes back to plain.
-    h.ctx.startEdit(stored(h).find((i) => i.name === "Bread").id);
-    const row2 = h.els["items"].children[0].children[1];
-    row2.children[2].click();
-    check("no marks left", marks(h).join() === ",,,", marks(h));
+    // Tapping cycles it, and it wraps: one tap on the least sure is "certain".
+    h.ctx.startEdit(id("Camembert"));
+    const row2 = editRow(h);
+    certBtn(row2).click();
+    check("tapping cycles the label", certBtn(row2).textContent === "sure", certBtn(row2).textContent);
+    ctl(row2, "Save").click();
+    check("certainty saved from the button", cert("Camembert") === "high", stored(h));
+    check("and it sorts as sure", shown(h).join() === "Bread,Camembert,Quark,Mystery", shown(h));
+
+    // An item the model made no claim about opens as certain: someone looked.
+    h.ctx.startEdit(id("Mystery"));
+    const row3 = editRow(h);
+    check("an unrated row opens as sure", certBtn(row3).textContent === "sure", certBtn(row3).textContent);
+    ctl(row3, "Save").click();
+    check("saving gives it a claim", cert("Mystery") === "high", stored(h));
+
+    // Once the last of them is settled, the hint goes back to the plain one.
+    h.ctx.startEdit(id("Bread"));
+    const row4 = editRow(h);
+    certBtn(row4).click();
+    certBtn(row4).click();
+    check("cycling wraps round the whole list", certBtn(row4).textContent === "sure", certBtn(row4).textContent);
+    ctl(row4, "Save").click();
+    check("nothing dotted left", marks(h).join() === "cert-high,cert-high,cert-high,cert-high", marks(h));
     check("hint back to the plain instruction", /Tap an item/.test(h.els["items-hint"].textContent), h.els["items-hint"].textContent);
 
-    // Items logged before the field existed must not all light up.
+    // Items logged before the field existed read as unrated, not as guesses.
     const h2 = makeHarness({
       store: { ...baseStore(), "protein.days": JSON.stringify({ [Object.keys(days(h))[0]]: [{ id: "old", name: "Legacy", amount: "", protein: 5 }] }) },
       fetchImpl: async () => ok([]),
     });
-    check("an item with no certainty field is unmarked", marks(h2).join() === "", marks(h2));
+    check("an item with no certainty field reads as unrated", marks(h2).join() === "cert-unrated", marks(h2));
   }
 
   console.log("\n" + pass + " passed, " + fail + " failed");

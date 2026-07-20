@@ -1,21 +1,33 @@
 #!/bin/sh
-# Regenerates the app icons from the inline SVG below. Requires ImageMagick.
-# The glyph is drawn as a path (not text) so rendering needs no font.
+# Regenerates the app icons from logo.jpg. Requires ImageMagick.
+#
+# logo.jpg is a mockup: the artwork sits on a rounded white card with a drop
+# shadow, on a near-white page. Both iOS and Android mask icons themselves, so
+# baking the card in would give doubly-rounded corners with a shadow trapped
+# inside them. We crop to the artwork alone and let the platform do the rest.
 set -e
 cd "$(dirname "$0")/.."
 
-cat > /tmp/protein-icon.svg <<'SVG'
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
-  <rect width="512" height="512" fill="#111111"/>
-  <!-- Scaled to 80% so the glyph survives Android's maskable safe zone. -->
-  <g transform="translate(256,256) scale(0.8) translate(-256,-256)" fill="#ffffff" fill-rule="evenodd">
-    <path d="M136 110 H286 A90 90 0 0 1 286 290 H196 V402 H136 Z
-             M196 170 H286 A30 30 0 0 1 286 230 H196 Z"/>
-  </g>
-</svg>
-SVG
+# Bounding box of the artwork inside the card, measured with:
+#   magick logo.jpg -crop 510x540+260+230 +repage -fuzz 8% -format "%@\n" info:
+ART="301x368+393+328"
 
-magick -background none /tmp/protein-icon.svg -resize 512x512 icon-512.png
-magick -background none /tmp/protein-icon.svg -resize 192x192 icon-192.png
-magick -background none /tmp/protein-icon.svg -resize 180x180 apple-touch-icon.png
+# The glyph is taller than it is wide. Scaled so its bounding circle fits
+# Android's maskable safe zone (the centre 80%, i.e. radius 0.4 x size), the
+# tightest mask any platform applies.
+W=0.508
+H=0.621
+
+# JPEG leaves the card's white a shade off pure white; snap it back so the icon
+# background matches the manifest's #ffffff. Stays clear of the bar's grey.
+magick logo.jpg -crop "$ART" +repage -white-threshold 95% /tmp/protein-art.png
+
+for spec in "icon-512.png 512" "icon-192.png 192" "apple-touch-icon.png 180"; do
+  set -- $spec
+  w=$(awk "BEGIN{printf \"%d\", $2 * $W}")
+  h=$(awk "BEGIN{printf \"%d\", $2 * $H}")
+  magick /tmp/protein-art.png -filter Lanczos -resize "${w}x${h}!" \
+    -background white -gravity center -extent "$2x$2" -strip "$1"
+done
+
 echo "icons written"

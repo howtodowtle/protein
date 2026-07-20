@@ -444,8 +444,8 @@ const baseStore = () => ({ "protein.apiKey": "sk-test", "protein.provider": "ant
     h.els["log-btn"].click();
     await settle();
 
-    const id = (name) => stored(h).find((i) => i.name === name).id;
-    const cert = (name) => stored(h).find((i) => i.name === name).certainty;
+    // One lookup, read for whichever field the assertion is about.
+    const item = (name) => stored(h).find((i) => i.name === name);
 
     // One assertion over the whole fixture, so adding a case to it cannot leave
     // a hand-picked index quietly checking the wrong row.
@@ -459,32 +459,32 @@ const baseStore = () => ({ "protein.apiKey": "sk-test", "protein.provider": "ant
 
     // Saving is not a claim about the number: the editor carries the row's own
     // certainty across untouched, and the button is the only thing that sets it.
-    h.ctx.startEdit(id("Camembert"));
+    h.ctx.startEdit(item("Camembert").id);
     const row = editRow(h);
     check("editor opens on the stored certainty", certBtn(row).textContent === "not sure", certBtn(row).textContent);
     row.children[1].value = "14";
     ctl(row, "Save").click();
-    check("grams corrected", stored(h).find((i) => i.name === "Camembert").protein === 14, stored(h));
-    check("certainty untouched by the edit", cert("Camembert") === "low", stored(h));
+    check("grams corrected", item("Camembert").protein === 14, stored(h));
+    check("certainty untouched by the edit", item("Camembert").certainty === "low", stored(h));
 
-    // Tapping cycles it, and it wraps: one tap on the least sure is "certain".
-    h.ctx.startEdit(id("Camembert"));
+    // Tapping cycles it, and it wraps: one tap on the least sure is "sure".
+    h.ctx.startEdit(item("Camembert").id);
     const row2 = editRow(h);
     certBtn(row2).click();
     check("tapping cycles the label", certBtn(row2).textContent === "sure", certBtn(row2).textContent);
     ctl(row2, "Save").click();
-    check("certainty saved from the button", cert("Camembert") === "high", stored(h));
+    check("certainty saved from the button", item("Camembert").certainty === "high", stored(h));
     check("and it sorts as sure", shown(h).join() === "Bread,Camembert,Quark,Mystery", shown(h));
 
-    // An item the model made no claim about opens as certain: someone looked.
-    h.ctx.startEdit(id("Mystery"));
+    // An item the model made no claim about opens as sure: someone looked.
+    h.ctx.startEdit(item("Mystery").id);
     const row3 = editRow(h);
     check("an unrated row opens as sure", certBtn(row3).textContent === "sure", certBtn(row3).textContent);
     ctl(row3, "Save").click();
-    check("saving gives it a claim", cert("Mystery") === "high", stored(h));
+    check("saving gives it a claim", item("Mystery").certainty === "high", stored(h));
 
     // Once the last of them is settled, the hint goes back to the plain one.
-    h.ctx.startEdit(id("Bread"));
+    h.ctx.startEdit(item("Bread").id);
     const row4 = editRow(h);
     certBtn(row4).click();
     certBtn(row4).click();

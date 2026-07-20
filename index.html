@@ -224,11 +224,10 @@
     line-height: 1; padding: 0 4px; color: #6b6b6b;
   }
 
-  /* Correcting an estimate: the row turns into its own fields, in place.
-     The fields wear the shared input box above; only the layout differs. */
-  /* The row being corrected drops its certainty rule: the button inside it is
-     the live answer, and a stale second reading of the same thing an inch away
-     would only argue with it. */
+  /* Correcting an estimate: the row turns into its own fields, in place, and
+     drops its certainty rule — the button inside it is the live answer, and a
+     stale second reading of the same thing an inch away would only argue with
+     it. The fields wear the shared input box above; only the layout differs. */
   #items li.editing { display: block; border-bottom-style: solid; }
   #items li.editing::after { content: none; }
   .edit-name { display: block; width: 100%; font-weight: 700; }
@@ -560,6 +559,11 @@ function loadGoal() {
   var g = parseInt(localStorage.getItem(KEY_GOAL), 10);
   return g > 0 ? g : 200;
 }
+// Both toggles below step through their list and wrap. A value that is not in
+// the list lands on the first one, which is the right answer for a stale or
+// hand-edited setting: it starts the cycle over rather than getting stuck.
+function cycle(list, cur) { return list[(list.indexOf(cur) + 1) % list.length]; }
+
 // How the day's list can be ordered. One object holds all three of the modes,
 // the order the toggle cycles them (keys keep their insertion order) and their
 // labels, so adding a mode is one line and there is no second list to forget.
@@ -573,19 +577,16 @@ function loadSort() {
   return SORTS.indexOf(s) < 0 ? "recent" : s;
 }
 
-// How much of an item's number the model had to guess. Sure first, so the index
-// doubles as the rank — shifted by one to leave 0 for "said nothing", which is
-// its own thing and not a synonym for sure: an item saved before the field
-// existed makes no claim either way, so it sorts below even the sure ones
-// rather than jumping the queue of things actually worth checking. Only these
-// three words mean anything, and an array rather than an object means a name
-// like "constructor" cannot come back as a match.
-// One object again holds the words, the order the editor's button cycles them
-// and how each reads to a human, so a fourth grade is one line and there is no
-// second list to forget. "unrated" is deliberately absent: it is what the model
-// failing to answer looks like, not something a person would choose.
-// All three are the same word bent, so which outranks which needs no learning —
-// and it is the word the sort control above already uses.
+// How much of an item's number the model had to guess. Same shape again: one
+// object holds the words, the order the editor's button cycles them and how
+// each reads to a human. All three are the same word bent, so which outranks
+// which needs no learning — and it is the word the sort control above already
+// uses. Sure leads, so the index doubles as the rank, shifted by one to leave 0
+// for "said nothing": an item saved before the field existed makes no claim
+// either way, so it sorts below even the sure ones rather than jumping the
+// queue of things actually worth checking. That is also why "unrated" is not in
+// here — it is what the model failing to answer looks like, not something a
+// person would choose.
 var CERT_LABELS = { high: "sure", medium: "fairly sure", low: "not sure" };
 var CERTAINTY = Object.keys(CERT_LABELS);
 function certRank(v) { return CERTAINTY.indexOf(v) + 1; }
@@ -845,7 +846,7 @@ function render() {
   // A rule nobody can read is decoration, so the hint explains itself the moment
   // a row is drawn as anything but certain — and goes back to the plain
   // instruction once the last of them has been corrected away.
-  itemsHint.textContent = items.some(function (i) { return i.certainty !== "high"; })
+  itemsHint.textContent = items.some(function (i) { return i.certainty !== CERTAINTY[0]; })
     ? "Dotted means less certain — tap to fix."
     : "Tap an item to fix its name, amount or grams.";
   // One item cannot be out of order, so the control only earns its space at two.
@@ -943,7 +944,7 @@ function editRow(it) {
   certBtn.type = "button";
   certBtn.setAttribute("aria-label", "How sure this is. Tap to change.");
   certBtn.addEventListener("click", function () {
-    cert = CERTAINTY[(CERTAINTY.indexOf(cert) + 1) % CERTAINTY.length];
+    cert = cycle(CERTAINTY, cert);
     certBtn.textContent = CERT_LABELS[cert];
   });
 
@@ -1277,7 +1278,7 @@ function saveSettings() {
 }
 
 sortToggle.addEventListener("click", function () {
-  var next = SORTS[(SORTS.indexOf(loadSort()) + 1) % SORTS.length];
+  var next = cycle(SORTS, loadSort());
   try { localStorage.setItem(KEY_SORT, next); } catch (e) {}
   render();
 });

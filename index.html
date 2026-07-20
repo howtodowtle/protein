@@ -1,0 +1,476 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fuzzy Protein</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+    background: #fff;
+    color: #111;
+    min-height: 100vh;
+  }
+  .wrap { max-width: 28rem; margin: 0 auto; padding: 0 20px 64px; }
+
+  header { padding-top: 32px; }
+  .header-row { display: flex; align-items: baseline; justify-content: space-between; }
+  h1 { font-size: 34px; font-weight: 900; letter-spacing: -0.02em; line-height: 1; }
+  .date { font-size: 14px; color: #6b6b6b; margin-top: 4px; }
+  .rule-8 { height: 8px; background: #111; margin-top: 12px; }
+  .rule-4 { height: 4px; background: #111; }
+
+  .link-btn {
+    background: none; border: none; font: inherit; cursor: pointer;
+    font-size: 14px; color: #6b6b6b;
+    text-decoration: underline; text-underline-offset: 4px;
+  }
+
+  /* Settings */
+  #settings { margin-top: 16px; border: 2px solid #111; padding: 14px; display: none; }
+  #settings.open { display: block; }
+  #settings h2 { font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.1em; }
+  #settings p { font-size: 13px; color: #6b6b6b; margin-top: 6px; line-height: 1.4; }
+  .settings-row { display: flex; gap: 8px; margin-top: 10px; }
+  #api-key-input {
+    flex: 1; min-width: 0; border: 2px solid #111; padding: 8px 10px;
+    font: inherit; font-size: 14px;
+  }
+  #api-key-input:focus { outline: 2px solid #111; outline-offset: 1px; }
+
+  .btn-solid {
+    background: #111; color: #fff; border: none; font: inherit; font-weight: 700;
+    padding: 8px 14px; cursor: pointer; font-size: 14px;
+  }
+  .btn-solid:disabled { opacity: 0.4; cursor: default; }
+
+  /* Total vs goal */
+  .total-section { padding-top: 16px; }
+  .total-row { display: flex; align-items: flex-end; justify-content: space-between; }
+  .label-tiny { font-size: 12px; text-transform: uppercase; letter-spacing: 0.15em; color: #6b6b6b; }
+  #total {
+    font-size: 64px; font-weight: 900; letter-spacing: -0.03em; line-height: 1;
+  }
+  #total .unit { font-size: 24px; font-weight: 700; }
+  .hit { color: #1b7a43; }
+  .goal-area { text-align: right; padding-bottom: 4px; }
+  #goal-edit { display: none; align-items: center; gap: 8px; }
+  #goal-edit.open { display: flex; }
+  #goal-edit.open + #goal-show { display: none; }
+  #goal-input {
+    width: 80px; border: 2px solid #111; padding: 6px 8px; text-align: right;
+    font: inherit; font-weight: 700; font-size: 15px;
+  }
+  #bar-track { height: 14px; background: #ececec; margin-top: 12px; }
+  #bar-fill { height: 100%; width: 0; background: #111; transition: width 400ms ease; }
+  #bar-fill.hit-bg { background: #1b7a43; }
+  #goal-msg { margin-top: 8px; font-size: 14px; font-weight: 700; color: #1b7a43; display: none; }
+
+  /* Input */
+  .entry { margin-top: 24px; }
+  .entry-box { border: 2px solid #111; }
+  #food-input {
+    display: block; width: 100%; border: none; resize: none;
+    padding: 12px; font: inherit; font-size: 16px;
+  }
+  #food-input:focus { outline: none; }
+  #log-btn {
+    display: block; width: 100%; background: #111; color: #fff; border: none;
+    font: inherit; font-weight: 700; font-size: 16px; padding: 12px; cursor: pointer;
+  }
+  #log-btn:disabled { opacity: 0.4; cursor: default; }
+  #error { margin-top: 8px; font-size: 14px; font-weight: 700; color: #b3261e; display: none; }
+
+  /* Items */
+  .items-section { margin-top: 24px; }
+  #empty-msg { padding: 16px 0; font-size: 14px; color: #6b6b6b; }
+  #items { list-style: none; }
+  #items li {
+    display: flex; align-items: baseline; justify-content: space-between;
+    padding: 12px 0; border-bottom: 1px solid #dcdcdc;
+  }
+  .item-name { font-weight: 700; }
+  .item-amount { margin-left: 8px; font-size: 14px; color: #6b6b6b; }
+  .item-left { padding-right: 12px; min-width: 0; }
+  .item-right { display: flex; align-items: baseline; gap: 12px; flex-shrink: 0; }
+  .item-grams { font-weight: 900; font-variant-numeric: tabular-nums; }
+  .item-del {
+    background: none; border: none; cursor: pointer; font-size: 18px;
+    line-height: 1; padding: 0 4px; color: #6b6b6b;
+  }
+
+  /* Week chart */
+  .week-section { margin-top: 32px; }
+  .week-head { padding-top: 12px; }
+  #week { display: flex; align-items: flex-end; justify-content: space-between; gap: 8px; margin-top: 12px; height: 72px; }
+  .day-col { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: flex-end; height: 100%; }
+  .day-bar { width: 100%; background: #bdbdbd; }
+  .day-bar.today { background: #111; }
+  .day-bar.hit-bg { background: #1b7a43; }
+  .day-label { margin-top: 4px; font-size: 12px; color: #6b6b6b; }
+  .day-label.today { color: #111; font-weight: 700; }
+
+  .footnote { margin-top: 16px; font-size: 12px; color: #6b6b6b; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div class="header-row">
+      <h1>Fuzzy Protein</h1>
+      <button id="settings-toggle" class="link-btn" type="button">settings</button>
+    </div>
+    <p class="date" id="date-label"></p>
+    <div class="rule-8"></div>
+  </header>
+
+  <section id="settings">
+    <h2>API key</h2>
+    <p>Paste your Anthropic API key. It is stored only in this browser
+       (localStorage) and sent only to api.anthropic.com.</p>
+    <div class="settings-row">
+      <input id="api-key-input" type="password" placeholder="sk-ant-…" autocomplete="off">
+      <button id="api-key-save" class="btn-solid" type="button">Save</button>
+    </div>
+  </section>
+
+  <section class="total-section">
+    <div class="total-row">
+      <div>
+        <div class="label-tiny">today</div>
+        <div id="total">0<span class="unit"> g</span></div>
+      </div>
+      <div class="goal-area">
+        <div id="goal-edit">
+          <input id="goal-input" type="number" min="1" inputmode="numeric">
+          <button id="goal-save" class="btn-solid" type="button">Set</button>
+        </div>
+        <button id="goal-show" class="link-btn" type="button"></button>
+      </div>
+    </div>
+    <div id="bar-track"><div id="bar-fill"></div></div>
+    <p id="goal-msg">Goal reached.</p>
+  </section>
+
+  <section class="entry">
+    <div class="entry-box">
+      <textarea id="food-input" rows="2"
+        placeholder="4 fried eggs, 2 spoons of sauerkraut…"></textarea>
+      <button id="log-btn" type="button">Log it</button>
+    </div>
+    <p id="error"></p>
+  </section>
+
+  <section class="items-section">
+    <div class="rule-4"></div>
+    <p id="empty-msg">Nothing logged yet. Type what you ate.</p>
+    <ul id="items"></ul>
+  </section>
+
+  <section class="week-section">
+    <div class="rule-8"></div>
+    <div class="week-head">
+      <span class="label-tiny">last 7 days</span>
+    </div>
+    <div id="week"></div>
+    <p class="footnote">Estimates are approximate. Values in grams.</p>
+  </section>
+
+</div>
+
+<script>
+"use strict";
+
+// ---------- storage ----------
+var KEY_API = "protein.apiKey";
+var KEY_GOAL = "protein.goal";
+var KEY_DAYS = "protein.days";
+
+function loadDays() {
+  try {
+    var raw = localStorage.getItem(KEY_DAYS);
+    var obj = raw ? JSON.parse(raw) : {};
+    return obj && typeof obj === "object" ? obj : {};
+  } catch (e) { return {}; }
+}
+function saveDays(days) {
+  try { localStorage.setItem(KEY_DAYS, JSON.stringify(days)); return true; }
+  catch (e) { return false; }
+}
+function loadGoal() {
+  var g = parseInt(localStorage.getItem(KEY_GOAL), 10);
+  return g > 0 ? g : 200;
+}
+function apiKey() { return localStorage.getItem(KEY_API) || ""; }
+
+// ---------- dates ----------
+function fmt(d) {
+  return d.getFullYear() + "-" +
+    String(d.getMonth() + 1).padStart(2, "0") + "-" +
+    String(d.getDate()).padStart(2, "0");
+}
+function todayKey() { return fmt(new Date()); }
+
+// ---------- Claude parsing ----------
+var PARSE_PROMPT =
+  'You are a protein estimator. The input is a casual, fuzzy description of ' +
+  'food someone ate (any language, vague amounts allowed). Split it into items ' +
+  'and estimate grams of protein per item using realistic metric portions. Be ' +
+  'sensible with fuzzy units ("a spoon", "a handful", "a bowl"). Respond with ' +
+  'ONLY a raw JSON array, no markdown fences, no prose. Schema: ' +
+  '[{"name": string, "amount": string, "protein_g": number}] . protein_g is a ' +
+  'whole number >= 0 for the stated amount (not per unit). Keep names short ' +
+  'and capitalized. Input: ';
+
+async function parseFood(text) {
+  var res = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "x-api-key": apiKey(),
+      "anthropic-version": "2023-06-01",
+      "content-type": "application/json",
+      "anthropic-dangerous-direct-browser-access": "true"
+    },
+    body: JSON.stringify({
+      model: "claude-haiku-4-5-20251001",
+      max_tokens: 500,
+      messages: [{ role: "user", content: PARSE_PROMPT + JSON.stringify(text) }]
+    })
+  });
+
+  var data = await res.json();
+  if (!res.ok) {
+    var msg = (data && data.error && data.error.message) || ("API error (" + res.status + ")");
+    var err = new Error(msg);
+    err.isApi = true;
+    throw err;
+  }
+
+  var raw = (data.content || [])
+    .filter(function (b) { return b.type === "text"; })
+    .map(function (b) { return b.text; })
+    .join("\n");
+  var clean = raw.replace(/```json|```/g, "").trim();
+  var arr = JSON.parse(clean);
+  if (!Array.isArray(arr)) throw new Error("bad shape");
+
+  return arr
+    .filter(function (x) { return x && typeof x.name === "string"; })
+    .map(function (x) {
+      return {
+        id: (crypto.randomUUID ? crypto.randomUUID()
+             : Math.random().toString(36).slice(2) + Date.now().toString(36)),
+        name: x.name,
+        amount: String(x.amount == null ? "" : x.amount),
+        protein: Math.max(0, Math.round(Number(x.protein_g) || 0))
+      };
+    });
+}
+
+// ---------- elements ----------
+var $ = function (id) { return document.getElementById(id); };
+var settingsEl = $("settings"), keyInput = $("api-key-input");
+var totalEl = $("total"), goalShow = $("goal-show"), goalEdit = $("goal-edit"), goalInput = $("goal-input");
+var barFill = $("bar-fill"), goalMsg = $("goal-msg");
+var foodInput = $("food-input"), logBtn = $("log-btn"), errorEl = $("error");
+var itemsEl = $("items"), emptyMsg = $("empty-msg"), weekEl = $("week");
+
+// ---------- rendering ----------
+function showError(msg) {
+  errorEl.textContent = msg;
+  errorEl.style.display = msg ? "block" : "none";
+}
+
+function render() {
+  var days = loadDays();
+  var goal = loadGoal();
+  var items = days[todayKey()] || [];
+  var total = items.reduce(function (s, i) { return s + i.protein; }, 0);
+  var hit = total >= goal;
+
+  // date
+  $("date-label").textContent = new Date().toLocaleDateString(undefined, {
+    weekday: "long", day: "numeric", month: "long"
+  });
+
+  // total + goal
+  totalEl.innerHTML = total + '<span class="unit"> g</span>';
+  totalEl.classList.toggle("hit", hit);
+  goalShow.textContent = "goal " + goal + " g";
+  var pct = Math.min(100, (total / goal) * 100);
+  barFill.style.width = pct + "%";
+  barFill.classList.toggle("hit-bg", hit);
+  goalMsg.style.display = hit ? "block" : "none";
+
+  // items
+  itemsEl.innerHTML = "";
+  emptyMsg.style.display = items.length ? "none" : "block";
+  items.forEach(function (it) {
+    var li = document.createElement("li");
+
+    var left = document.createElement("div");
+    left.className = "item-left";
+    var name = document.createElement("span");
+    name.className = "item-name";
+    name.textContent = it.name;
+    left.appendChild(name);
+    if (it.amount) {
+      var amt = document.createElement("span");
+      amt.className = "item-amount";
+      amt.textContent = it.amount;
+      left.appendChild(amt);
+    }
+
+    var right = document.createElement("div");
+    right.className = "item-right";
+    var grams = document.createElement("span");
+    grams.className = "item-grams";
+    grams.textContent = it.protein + " g";
+    var del = document.createElement("button");
+    del.className = "item-del";
+    del.type = "button";
+    del.textContent = "×";
+    del.setAttribute("aria-label", "Remove " + it.name);
+    del.addEventListener("click", function () { removeItem(it.id); });
+    right.appendChild(grams);
+    right.appendChild(del);
+
+    li.appendChild(left);
+    li.appendChild(right);
+    itemsEl.appendChild(li);
+  });
+
+  // week chart
+  weekEl.innerHTML = "";
+  var labels = ["S", "M", "T", "W", "T", "F", "S"];
+  for (var i = 6; i >= 0; i--) {
+    var d = new Date();
+    d.setDate(d.getDate() - i);
+    var list = days[fmt(d)] || [];
+    var dayTotal = list.reduce(function (s, it) { return s + it.protein; }, 0);
+    var isToday = i === 0;
+    var ratio = Math.min(1, dayTotal / goal);
+
+    var col = document.createElement("div");
+    col.className = "day-col";
+    var bar = document.createElement("div");
+    bar.className = "day-bar" +
+      (dayTotal >= goal ? " hit-bg" : isToday ? " today" : "");
+    bar.style.height = Math.max(3, ratio * 56) + "px";
+    bar.title = dayTotal + " g";
+    var lab = document.createElement("span");
+    lab.className = "day-label" + (isToday ? " today" : "");
+    lab.textContent = labels[d.getDay()];
+    col.appendChild(bar);
+    col.appendChild(lab);
+    weekEl.appendChild(col);
+  }
+}
+
+// ---------- actions ----------
+function removeItem(id) {
+  var days = loadDays();
+  var key = todayKey();
+  days[key] = (days[key] || []).filter(function (i) { return i.id !== id; });
+  if (!saveDays(days)) showError("Saving failed — storage unavailable.");
+  render();
+}
+
+async function log() {
+  var text = foodInput.value.trim();
+  if (!text || logBtn.disabled) return;
+
+  if (!apiKey()) {
+    settingsEl.classList.add("open");
+    keyInput.focus();
+    showError("Add your API key first.");
+    return;
+  }
+
+  logBtn.disabled = true;
+  foodInput.disabled = true;
+  logBtn.textContent = "Estimating…";
+  showError("");
+
+  try {
+    var parsed = await parseFood(text);
+    if (parsed.length === 0) {
+      showError("No food recognized — try rephrasing.");
+    } else {
+      var days = loadDays();
+      var key = todayKey();
+      days[key] = (days[key] || []).concat(parsed);
+      if (!saveDays(days)) showError("Saving failed — storage unavailable.");
+      foodInput.value = "";
+    }
+  } catch (e) {
+    showError(e && e.isApi ? e.message : "Couldn't parse that — try rephrasing.");
+  }
+
+  logBtn.disabled = false;
+  foodInput.disabled = false;
+  logBtn.textContent = "Log it";
+  render();
+  foodInput.focus();
+}
+
+// ---------- wiring ----------
+logBtn.addEventListener("click", log);
+foodInput.addEventListener("keydown", function (e) {
+  if (e.key === "Enter" && !e.shiftKey) {
+    e.preventDefault();
+    log();
+  }
+});
+
+$("settings-toggle").addEventListener("click", function () {
+  settingsEl.classList.toggle("open");
+  if (settingsEl.classList.contains("open")) {
+    keyInput.value = apiKey();
+    keyInput.focus();
+  }
+});
+$("api-key-save").addEventListener("click", saveKey);
+keyInput.addEventListener("keydown", function (e) {
+  if (e.key === "Enter") { e.preventDefault(); saveKey(); }
+});
+function saveKey() {
+  var v = keyInput.value.trim();
+  if (!v) return;
+  try { localStorage.setItem(KEY_API, v); } catch (e) {}
+  settingsEl.classList.remove("open");
+  showError("");
+  foodInput.focus();
+}
+
+goalShow.addEventListener("click", function () {
+  goalInput.value = loadGoal();
+  goalEdit.classList.add("open");
+  goalInput.focus();
+  goalInput.select();
+});
+$("goal-save").addEventListener("click", saveGoal);
+goalInput.addEventListener("keydown", function (e) {
+  if (e.key === "Enter") { e.preventDefault(); saveGoal(); }
+});
+function saveGoal() {
+  var g = Math.max(1, Math.round(Number(goalInput.value) || loadGoal()));
+  try { localStorage.setItem(KEY_GOAL, String(g)); } catch (e) {}
+  goalEdit.classList.remove("open");
+  render();
+}
+
+// first run: no key -> open settings
+if (!apiKey()) settingsEl.classList.add("open");
+render();
+
+// re-render at midnight rollover / when tab regains focus
+document.addEventListener("visibilitychange", function () {
+  if (!document.hidden) render();
+});
+</script>
+</body>
+</html>

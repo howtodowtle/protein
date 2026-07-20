@@ -34,13 +34,18 @@
   #settings h2 { font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.1em; }
   #settings p { font-size: 13px; color: #6b6b6b; margin-top: 6px; line-height: 1.4; }
   .settings-row { display: flex; gap: 8px; margin-top: 10px; }
-  #api-key-input, #model-input, #provider-select {
+  .field-col { flex: 1; min-width: 0; }
+  .field-col .field-label { margin-top: 0; margin-bottom: 4px; }
+  #api-key-input, #model-input, #provider-select, #thinking-select, #effort-input {
     flex: 1; min-width: 0; border: 2px solid #111; padding: 8px 10px;
     font: inherit; font-size: 14px; background: #fff; color: #111; border-radius: 0;
   }
-  #api-key-input:focus, #model-input:focus, #provider-select:focus {
+  #api-key-input:focus, #model-input:focus, #provider-select:focus,
+  #thinking-select:focus, #effort-input:focus {
     outline: 2px solid #111; outline-offset: 1px;
   }
+  #thinking-select, #effort-input { width: 100%; }
+  #api-key-save { width: 100%; }
   .field-label {
     font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em;
     color: #6b6b6b; margin-top: 12px;
@@ -87,7 +92,11 @@
     font: inherit; font-weight: 700; font-size: 16px; padding: 12px; cursor: pointer;
   }
   #log-btn:disabled { opacity: 0.4; cursor: default; }
-  #error { margin-top: 8px; font-size: 14px; font-weight: 700; color: #b3261e; display: none; }
+  #error {
+    margin-top: 8px; font-size: 14px; font-weight: 700; color: #b3261e; display: none;
+    white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.35;
+    user-select: text; -webkit-user-select: text;
+  }
 
   /* Items */
   .items-section { margin-top: 24px; }
@@ -145,6 +154,24 @@
     <div class="field-label">Model <span id="model-default"></span></div>
     <div class="settings-row">
       <input id="model-input" type="text" placeholder="" autocomplete="off" spellcheck="false">
+    </div>
+    <div class="settings-row">
+      <div class="field-col">
+        <div class="field-label">Thinking</div>
+        <select id="thinking-select">
+          <option value="">provider default</option>
+          <option value="on">on</option>
+          <option value="off">off</option>
+        </select>
+      </div>
+      <div class="field-col">
+        <div class="field-label">Effort</div>
+        <input id="effort-input" type="text" list="effort-options" placeholder="provider default"
+               autocomplete="off" spellcheck="false">
+        <datalist id="effort-options"></datalist>
+      </div>
+    </div>
+    <div class="settings-row">
       <button id="api-key-save" class="btn-solid" type="button">Save</button>
     </div>
     <p id="settings-note"></p>
@@ -199,13 +226,31 @@
 
 // ---------- providers ----------
 // Each provider maps the same request/response contract onto its own wire format.
+// opts = { thinking: "" | "on" | "off", effort: "" | <any string> }.
+// "" means send nothing and let the provider apply its own default. Values are
+// passed through verbatim — no whitelist here, so new API values keep working.
+var THINKING_BUDGET = 4000; // room for reasoning tokens when thinking is on
+
 var PROVIDERS = {
   anthropic: {
     label: "Anthropic (Claude)",
     host: "api.anthropic.com",
     model: "claude-haiku-4-5-20251001",
     keyHint: "sk-ant-…",
-    request: function (key, model, prompt) {
+    // Suggestions only — the field accepts anything and sends it verbatim.
+    efforts: ["low", "medium", "high", "xhigh", "max"],
+    effortNote: "output_config.effort — Claude 4.6+ only (xhigh: 4.7+). Haiku 4.5 has no effort setting.",
+    request: function (key, model, prompt, opts) {
+      var body = {
+        model: model,
+        max_tokens: opts.thinking === "on" ? THINKING_BUDGET : 500,
+        messages: [{ role: "user", content: prompt }]
+      };
+      // Adaptive thinking is the current form on Claude 4.6+; older models
+      // (incl. the default Haiku 4.5) will reject it — the error is shown as-is.
+      if (opts.thinking === "on") body.thinking = { type: "adaptive" };
+      if (opts.thinking === "off") body.thinking = { type: "disabled" };
+      if (opts.effort) body.output_config = { effort: opts.effort };
       return {
         url: "https://api.anthropic.com/v1/messages",
         headers: {
@@ -214,11 +259,7 @@ var PROVIDERS = {
           "content-type": "application/json",
           "anthropic-dangerous-direct-browser-access": "true"
         },
-        body: {
-          model: model,
-          max_tokens: 500,
-          messages: [{ role: "user", content: prompt }]
-        }
+        body: body
       };
     },
     extract: function (data) {
@@ -234,8 +275,10 @@ var PROVIDERS = {
     host: "api.deepseek.com",
     model: "deepseek-chat",
     keyHint: "sk-…",
-    request: function (key, model, prompt) {
-      return openaiRequest("https://api.deepseek.com/chat/completions", key, model, prompt);
+    efforts: ["high", "max"],
+    effortNote: "reasoning_effort — only high and max are distinct (low/medium map to high, xhigh to max).",
+    request: function (key, model, prompt, opts) {
+      return openaiRequest("https://api.deepseek.com/chat/completions", key, model, prompt, opts);
     },
     extract: openaiExtract
   },
@@ -245,8 +288,10 @@ var PROVIDERS = {
     host: "api.moonshot.ai",
     model: "kimi-latest",
     keyHint: "sk-…",
-    request: function (key, model, prompt) {
-      return openaiRequest("https://api.moonshot.ai/v1/chat/completions", key, model, prompt);
+    efforts: [],
+    effortNote: "reasoning_effort — not documented by Moonshot; may be ignored or rejected.",
+    request: function (key, model, prompt, opts) {
+      return openaiRequest("https://api.moonshot.ai/v1/chat/completions", key, model, prompt, opts);
     },
     extract: openaiExtract
   },
@@ -256,7 +301,19 @@ var PROVIDERS = {
     host: "generativelanguage.googleapis.com",
     model: "gemini-2.5-flash",
     keyHint: "AIza…",
-    request: function (key, model, prompt) {
+    efforts: ["low", "high"],
+    effortNote: "thinkingConfig.thinkingLevel — Gemini 3+ only; 2.5 uses a numeric thinkingBudget instead.",
+    request: function (key, model, prompt, opts) {
+      var cfg = {
+        responseMimeType: "application/json",
+        maxOutputTokens: opts.thinking === "off" ? 2000 : THINKING_BUDGET
+      };
+      // thinkingBudget: 0 disables, -1 lets the model decide.
+      if (opts.thinking === "off") cfg.thinkingConfig = { thinkingBudget: 0 };
+      // Gemini 3+ calls the effort dial thinkingLevel; the value is sent verbatim.
+      // thinkingLevel and thinkingBudget are mutually exclusive, so effort wins.
+      if (opts.effort) cfg.thinkingConfig = { thinkingLevel: opts.effort };
+      else if (opts.thinking === "on") cfg.thinkingConfig = { thinkingBudget: -1 };
       return {
         url: "https://generativelanguage.googleapis.com/v1beta/models/" +
              encodeURIComponent(model) + ":generateContent",
@@ -266,7 +323,7 @@ var PROVIDERS = {
         },
         body: {
           contents: [{ role: "user", parts: [{ text: prompt }] }],
-          generationConfig: { responseMimeType: "application/json", maxOutputTokens: 2000 }
+          generationConfig: cfg
         }
       };
     },
@@ -279,18 +336,22 @@ var PROVIDERS = {
 };
 
 // OpenAI-compatible chat/completions shape, shared by DeepSeek and Kimi.
-function openaiRequest(url, key, model, prompt) {
+function openaiRequest(url, key, model, prompt, opts) {
+  var body = {
+    model: model,
+    max_tokens: opts.thinking === "on" ? THINKING_BUDGET : 500,
+    messages: [{ role: "user", content: prompt }]
+  };
+  if (opts.thinking === "on") body.thinking = { type: "enabled" };
+  if (opts.thinking === "off") body.thinking = { type: "disabled" };
+  if (opts.effort) body.reasoning_effort = opts.effort;
   return {
     url: url,
     headers: {
       "authorization": "Bearer " + key,
       "content-type": "application/json"
     },
-    body: {
-      model: model,
-      max_tokens: 500,
-      messages: [{ role: "user", content: prompt }]
-    }
+    body: body
   };
 }
 function openaiExtract(data) {
@@ -311,6 +372,8 @@ function keyStorageKey(id) {
   return id === "anthropic" ? "protein.apiKey" : "protein.apiKey." + id;
 }
 function modelStorageKey(id) { return "protein.model." + id; }
+function thinkingStorageKey(id) { return "protein.thinking." + id; }
+function effortStorageKey(id) { return "protein.effort." + id; }
 
 function provider() {
   var id = localStorage.getItem(KEY_PROVIDER);
@@ -320,6 +383,13 @@ function apiKey(id) { return localStorage.getItem(keyStorageKey(id || provider()
 function modelFor(id) {
   id = id || provider();
   return (localStorage.getItem(modelStorageKey(id)) || "").trim() || PROVIDERS[id].model;
+}
+function optsFor(id) {
+  id = id || provider();
+  return {
+    thinking: localStorage.getItem(thinkingStorageKey(id)) || "",
+    effort: (localStorage.getItem(effortStorageKey(id)) || "").trim()
+  };
 }
 
 function loadDays() {
@@ -392,7 +462,7 @@ function apiError(msg) {
 async function parseFood(text) {
   var id = provider();
   var p = PROVIDERS[id];
-  var req = p.request(apiKey(id), modelFor(id), PARSE_PROMPT + JSON.stringify(text));
+  var req = p.request(apiKey(id), modelFor(id), PARSE_PROMPT + JSON.stringify(text), optsFor(id));
 
   var res;
   try {
@@ -406,19 +476,31 @@ async function parseFood(text) {
     throw apiError("Couldn't reach " + p.host + " — network error, or the provider blocks browser requests (CORS).");
   }
 
+  var bodyText = "";
+  try { bodyText = await res.text(); } catch (e) {}
   var data = null;
-  try { data = await res.json(); } catch (e) {}
+  try { data = JSON.parse(bodyText); } catch (e) {}
 
   if (!res.ok) {
-    // Anthropic, DeepSeek, Kimi and Gemini all nest the message the same way
-    var msg = (data && data.error && data.error.message) || ("API error (" + res.status + ")");
-    throw apiError(msg);
+    // Surface whatever the provider said, verbatim — never swallow or reinterpret it.
+    var msg = (data && data.error && (data.error.message || data.error)) ||
+              (data && data.message) || bodyText || "no response body";
+    if (typeof msg !== "string") msg = JSON.stringify(msg);
+    throw apiError(p.host + " HTTP " + res.status + ": " + msg);
   }
 
   var raw = p.extract(data || {});
   var clean = raw.replace(/```json|```/g, "").trim();
-  var arr = JSON.parse(clean);
-  if (!Array.isArray(arr)) throw new Error("bad shape");
+
+  var arr;
+  try {
+    arr = JSON.parse(clean);
+  } catch (e) {
+    throw apiError("Model did not return JSON. Response: " + (clean || bodyText || "empty"));
+  }
+  if (!Array.isArray(arr)) {
+    throw apiError("Expected a JSON array. Response: " + clean);
+  }
 
   return arr
     .filter(function (x) { return x && typeof x.name === "string"; })
@@ -438,6 +520,8 @@ var $ = function (id) { return document.getElementById(id); };
 var settingsEl = $("settings"), keyInput = $("api-key-input");
 var providerSelect = $("provider-select"), modelInput = $("model-input");
 var modelDefault = $("model-default"), settingsNote = $("settings-note");
+var thinkingSelect = $("thinking-select"), effortInput = $("effort-input");
+var effortOptions = $("effort-options");
 var totalEl = $("total"), goalShow = $("goal-show"), goalEdit = $("goal-edit"), goalInput = $("goal-input");
 var barFill = $("bar-fill"), goalMsg = $("goal-msg");
 var foodInput = $("food-input"), logBtn = $("log-btn"), errorEl = $("error");
@@ -571,7 +655,7 @@ async function log() {
       foodInput.value = "";
     }
   } catch (e) {
-    showError(e && e.isApi ? e.message : "Couldn't parse that — try rephrasing.");
+    showError((e && e.message) || "Couldn't parse that — try rephrasing.");
   }
 
   logBtn.disabled = false;
@@ -606,9 +690,20 @@ function syncSettings() {
   modelInput.value = localStorage.getItem(modelStorageKey(id)) || "";
   modelInput.placeholder = p.model;
   modelDefault.textContent = "(optional)";
+  var o = optsFor(id);
+  thinkingSelect.value = o.thinking;
+  effortInput.value = o.effort;
+  effortOptions.innerHTML = "";
+  (p.efforts || []).forEach(function (v) {
+    var opt = document.createElement("option");
+    opt.value = v;
+    effortOptions.appendChild(opt);
+  });
   settingsNote.textContent =
     "Your key is stored only in this browser (localStorage) and sent only to " +
-    p.host + ". Requests go straight from your browser to the provider.";
+    p.host + ". Requests go straight from your browser to the provider. " +
+    "Model and effort are sent verbatim, and only when set. " +
+    (p.effortNote || "");
 }
 
 function openSettings() {
@@ -625,7 +720,7 @@ $("settings-toggle").addEventListener("click", function () {
 providerSelect.addEventListener("change", syncSettings);
 
 $("api-key-save").addEventListener("click", saveSettings);
-[keyInput, modelInput].forEach(function (el) {
+[keyInput, modelInput, effortInput].forEach(function (el) {
   el.addEventListener("keydown", function (e) {
     if (e.key === "Enter") { e.preventDefault(); saveSettings(); }
   });
@@ -635,11 +730,17 @@ function saveSettings() {
   if (!PROVIDERS[id]) return;
   var key = keyInput.value.trim();
   var model = modelInput.value.trim();
+  var thinking = thinkingSelect.value;
+  var effort = effortInput.value.trim();
   try {
     localStorage.setItem(KEY_PROVIDER, id);
     if (key) localStorage.setItem(keyStorageKey(id), key);
     if (model) localStorage.setItem(modelStorageKey(id), model);
     else localStorage.removeItem(modelStorageKey(id));
+    if (thinking) localStorage.setItem(thinkingStorageKey(id), thinking);
+    else localStorage.removeItem(thinkingStorageKey(id));
+    if (effort) localStorage.setItem(effortStorageKey(id), effort);
+    else localStorage.removeItem(effortStorageKey(id));
   } catch (e) {}
   if (!apiKey(id)) { keyInput.focus(); showError("Add your API key first."); return; }
   settingsEl.classList.remove("open");

@@ -347,15 +347,41 @@ function fmt(d) {
 function todayKey() { return fmt(new Date()); }
 
 // ---------- parsing ----------
-var PARSE_PROMPT =
-  'You are a protein estimator. The input is a casual, fuzzy description of ' +
-  'food someone ate (any language, vague amounts allowed). Split it into items ' +
-  'and estimate grams of protein per item using realistic metric portions. Be ' +
-  'sensible with fuzzy units ("a spoon", "a handful", "a bowl"). Respond with ' +
-  'ONLY a raw JSON array, no markdown fences, no prose. Schema: ' +
-  '[{"name": string, "amount": string, "protein_g": number}] . protein_g is a ' +
-  'whole number >= 0 for the stated amount (not per unit). Keep names short ' +
-  'and capitalized. Input: ';
+var PARSE_PROMPT = [
+  'You are a protein estimator. The input is a casual, fuzzy description of food someone ate,',
+  'in any language, with vague amounts allowed. Split it into items and estimate the grams of',
+  'protein in each, using realistic metric portions.',
+  '',
+  'Rules:',
+  '- Respond with ONLY a raw JSON array. No markdown fences, no prose, no text before or after.',
+  '- Schema: [{"name": string, "amount": string, "protein_g": number}]',
+  '- protein_g is a whole number >= 0 for the whole stated amount, not per unit.',
+  '- One object per food mentioned, in the order mentioned. Never merge items and never drop one:',
+  '  list near-zero foods (butter, oil, most vegetables) with protein_g 0.',
+  '- amount is short and concrete and states the metric weight you assumed, e.g. "3 slices, ~135 g".',
+  '- Resolve fuzzy units to typical portions: slice of bread ~45 g, spoon ~15 g, handful ~30 g,',
+  '  bowl ~250 g, glass ~200 ml, "a bit" / "a little" ~10 g.',
+  '- If the input already states the protein content, use that number and do not re-estimate.',
+  '- Keep names short and capitalized. Keep the local name for regional products (Bauernbrot, Magerquark).',
+  '',
+  'Example input: "4 fried eggs, 3 slices of Bauernbrot, a bit of butter, and 2 thin slices of camembert"',
+  'Example output:',
+  '[{"name":"Fried eggs","amount":"4 eggs, ~220 g","protein_g":25},',
+  ' {"name":"Bauernbrot","amount":"3 slices, ~135 g","protein_g":10},',
+  ' {"name":"Butter","amount":"~10 g","protein_g":0},',
+  ' {"name":"Camembert","amount":"2 thin slices, ~40 g","protein_g":8}]',
+  '',
+  'Example input: "250 g joghurt + 200 g magerquark"',
+  'Example output:',
+  '[{"name":"Joghurt","amount":"250 g","protein_g":11},',
+  ' {"name":"Magerquark","amount":"200 g","protein_g":19}]',
+  '',
+  'Example input: "1 bar with 7.3 g protein"',
+  'Example output:',
+  '[{"name":"Protein bar","amount":"1 bar","protein_g":7}]',
+  '',
+  'Now do the same for this input: '
+].join("\n");
 
 function apiError(msg) {
   var err = new Error(msg);

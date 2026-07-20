@@ -371,6 +371,44 @@ const baseStore = () => ({ "protein.apiKey": "sk-test", "protein.provider": "ant
     check("caret restored", name.selectionStart === 4, name.selectionStart);
   }
 
+  // ---- 14. list order: newest first by default, by grams on request
+  {
+    console.log("14. sorting");
+    // Names of the rendered rows, top to bottom.
+    const shown = (h) => h.els["items"].children.map((li) => li.children[0].children[0].textContent);
+
+    // The queue drains in submission order (see 5), so reply N answers entry N.
+    const replies = [
+      [{ name: "Egg", amount: "", protein_g: 20 }],
+      [{ name: "Rice", amount: "", protein_g: 5 }],
+      [{ name: "Milk", amount: "", protein_g: 9 }],
+    ];
+    let call = 0;
+    const h = makeHarness({ store: baseStore(), fetchImpl: async () => ok(replies[call++]) });
+    ["egg", "rice", "milk"].forEach((t) => { h.els["food-input"].value = t; h.els["log-btn"].click(); });
+    await settle();
+
+    check("stored oldest first", days(h)[Object.keys(days(h))[0]].map((i) => i.name).join() === "Egg,Rice,Milk", days(h));
+    check("shown newest first", shown(h).join() === "Milk,Rice,Egg", shown(h));
+    check("toggle labelled by mode", h.els["sort-toggle"].textContent === "newest first", h.els["sort-toggle"].textContent);
+
+    h.els["sort-toggle"].click();
+    check("sorted by grams, highest first", shown(h).join() === "Egg,Milk,Rice", shown(h));
+    check("toggle relabelled", h.els["sort-toggle"].textContent === "most protein", h.els["sort-toggle"].textContent);
+    check("choice persisted", h.store[h.ctx.KEY_SORT] === "protein", h.store[h.ctx.KEY_SORT]);
+
+    // A stored value nobody recognises reads as the default, so the grams order
+    // above must give way to newest-first.
+    h.store[h.ctx.KEY_SORT] = "sideways";
+    h.ctx.render();
+    check("unknown mode falls back to newest first", shown(h).join() === "Milk,Rice,Egg", shown(h));
+
+    h.els["sort-toggle"].click();
+    check("toggling out of an unknown mode lands on a known one", shown(h).join() === "Egg,Milk,Rice", shown(h));
+    h.els["sort-toggle"].click();
+    check("toggles back", shown(h).join() === "Milk,Rice,Egg", shown(h));
+  }
+
   console.log("\n" + pass + " passed, " + fail + " failed");
   process.exit(fail ? 1 : 0);
 })();

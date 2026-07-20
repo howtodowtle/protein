@@ -143,6 +143,7 @@
 
   /* Items */
   .items-section { margin-top: 24px; }
+  .items-head { padding-top: 12px; }  /* flex layout comes from .header-row */
   #empty-msg { padding: 16px 0; font-size: 14px; color: #6b6b6b; }
   #items { list-style: none; }
   #items li {
@@ -259,6 +260,10 @@
 
   <section class="items-section">
     <div class="rule-4"></div>
+    <div id="items-head" class="header-row items-head">
+      <span class="label-tiny">logged</span>
+      <button id="sort-toggle" class="link-btn" type="button"></button>
+    </div>
     <p id="empty-msg">Nothing logged yet. Type what you ate.</p>
     <ul id="items"></ul>
     <p id="items-hint" class="footnote">Tap an item to fix its name, amount or grams.</p>
@@ -424,6 +429,7 @@ var KEY_GOAL = "protein.goal";
 var KEY_DAYS = "protein.days";
 var KEY_PROVIDER = "protein.provider";
 var KEY_QUEUE = "protein.queue";
+var KEY_SORT = "protein.sort";
 var MAX_ATTEMPTS = 3;
 var STORAGE_FAIL = "Saving failed — storage unavailable.";
 
@@ -476,6 +482,10 @@ function loadGoal() {
   var g = parseInt(localStorage.getItem(KEY_GOAL), 10);
   return g > 0 ? g : 200;
 }
+// How the day's list is ordered. "recent" is the default because the thing you
+// just ate is the thing you are looking at. Anything unrecognised reads as
+// "recent", so a stale or hand-edited value degrades to the default.
+function loadSort() { return localStorage.getItem(KEY_SORT) === "protein" ? "protein" : "recent"; }
 
 // ---------- queue ----------
 // Every submission lands here first and is only removed once it has been parsed
@@ -644,6 +654,7 @@ var totalEl = $("total"), goalShow = $("goal-show"), goalEdit = $("goal-edit"), 
 var barFill = $("bar-fill"), goalMsg = $("goal-msg");
 var foodInput = $("food-input"), logBtn = $("log-btn"), errorEl = $("error");
 var itemsEl = $("items"), emptyMsg = $("empty-msg"), itemsHint = $("items-hint");
+var itemsHead = $("items-head"), sortToggle = $("sort-toggle");
 var weekEl = $("week");
 var pendingEl = $("pending"), offlineNote = $("offline-note");
 
@@ -664,6 +675,16 @@ function delButton(cls, label, onClick) {
 }
 function sumProtein(items) {
   return items.reduce(function (s, i) { return s + i.protein; }, 0);
+}
+
+// Items carry no timestamp: a day is stored in the order things were logged, so
+// the array's own order is the record of when. Reversing a copy gives newest
+// first and leaves storage — and the drain's append — untouched. Sorting that
+// copy by grams is stable, so equal amounts stay newest first too.
+function sortItems(items, mode) {
+  var out = items.slice().reverse();
+  if (mode === "protein") out.sort(function (a, b) { return b.protein - a.protein; });
+  return out;
 }
 
 function showError(msg) {
@@ -701,7 +722,12 @@ function render() {
   itemsEl.innerHTML = "";
   emptyMsg.style.display = items.length ? "none" : "block";
   itemsHint.style.display = items.length ? "block" : "none";
-  items.forEach(function (it) {
+  // One item cannot be out of order, so the control only earns its space at two.
+  itemsHead.style.display = items.length > 1 ? "flex" : "none";
+  var sort = loadSort();
+  sortToggle.textContent = sort === "protein" ? "most protein" : "newest first";
+  sortToggle.setAttribute("aria-label", "Sort: " + sortToggle.textContent + ". Tap to change.");
+  sortItems(items, sort).forEach(function (it) {
     // A row being edited is moved, not rebuilt: a background render (a queued
     // entry draining, say) must not wipe out half-typed text or steal focus.
     if (it.id === editingId) {
@@ -1099,6 +1125,11 @@ function saveSettings() {
   foodInput.focus();
   drain();  // a fresh key or model may be exactly what the queue was waiting for
 }
+
+sortToggle.addEventListener("click", function () {
+  try { localStorage.setItem(KEY_SORT, loadSort() === "protein" ? "recent" : "protein"); } catch (e) {}
+  render();
+});
 
 goalShow.addEventListener("click", function () {
   goalInput.value = loadGoal();

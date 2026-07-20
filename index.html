@@ -2,8 +2,19 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#ffffff">
+<meta name="description" content="Type what you ate in plain language, get grams of protein.">
 <title>Fuzzy Protein</title>
+<link rel="manifest" href="./manifest.webmanifest">
+<link rel="icon" type="image/png" href="./icon-192.png">
+<link rel="apple-touch-icon" href="./apple-touch-icon.png">
+<!-- iOS home-screen app. status-bar-style "default" keeps the status bar its own
+     black-on-white strip; "black-translucent" would put white text on our white page. -->
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Protein">
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   html { -webkit-text-size-adjust: 100%; }
@@ -12,6 +23,10 @@
     background: #fff;
     color: #111;
     min-height: 100vh;
+    /* Keep clear of the notch and the home indicator when installed. */
+    padding:
+      env(safe-area-inset-top) env(safe-area-inset-right)
+      env(safe-area-inset-bottom) env(safe-area-inset-left);
   }
   .wrap { max-width: 28rem; margin: 0 auto; padding: 0 20px 64px; }
 
@@ -796,6 +811,19 @@ render();
 document.addEventListener("visibilitychange", function () {
   if (!document.hidden) render();
 });
+
+// Service worker: caches the shell so the installed app opens without network.
+// Parsing still needs the API — offline you can read the log, not add to it.
+if ("serviceWorker" in navigator && location.protocol.indexOf("http") === 0) {
+  window.addEventListener("load", function () {
+    navigator.serviceWorker.register("./sw.js").catch(function () {});
+  });
+}
+
+// Every log lives only in this browser's localStorage. Ask iOS not to evict it.
+if (navigator.storage && navigator.storage.persist) {
+  navigator.storage.persist().catch(function () {});
+}
 </script>
 </body>
 </html>

@@ -272,8 +272,59 @@
   .day-bar.hit-bg { background: #1b7a43; }
   .day-label { margin-top: 4px; font-size: 12px; color: #6b6b6b; }
   .day-label.today { color: #111; font-weight: 700; }
+  /* A bar is a way into that day's read-only detail. The whole column is the
+     target — bar plus label — so a thumb aimed at a short bar still lands. */
+  .day-col { cursor: pointer; }
 
   .footnote { margin-top: 16px; font-size: 12px; color: #6b6b6b; }
+
+  /* History — read-only. A single day reached by tapping its bar, the whole run
+     of days reached by the link under the chart. It sits over the page as its
+     own screen rather than growing the scroll, so the main view is untouched. */
+  #history {
+    position: fixed; inset: 0; z-index: 10; background: #fff;
+    display: none; overflow-y: auto; -webkit-overflow-scrolling: touch;
+    padding:
+      env(safe-area-inset-top) env(safe-area-inset-right)
+      env(safe-area-inset-bottom) env(safe-area-inset-left);
+  }
+  #history.open { display: block; }
+  .history-wrap { max-width: 28rem; margin: 0 auto; padding: 20px 20px 64px; }
+  .history-top { display: flex; align-items: baseline; justify-content: space-between; }
+  /* Back only earns its place once there is somewhere to go back to — the day
+     detail. In the list it is hidden but still holds its side of the row so
+     close keeps the right edge it has in both. */
+  #history-back { visibility: hidden; }
+  #history.day-view #history-back { visibility: visible; }
+  .history-title { font-size: 30px; font-weight: 900; letter-spacing: -0.02em; line-height: 1.05; margin-top: 8px; }
+  .history-sub { font-size: 14px; color: #6b6b6b; margin-top: 4px; }
+  .history-sub.hit { color: #1b7a43; font-weight: 700; }
+
+  /* The list of days, newest first. Each row is the button into its day. */
+  #history-body { margin-top: 4px; }
+  .hist-list { list-style: none; }
+  .hist-day {
+    display: flex; align-items: baseline; justify-content: space-between;
+    width: 100%; gap: 12px; padding: 15px 0; text-align: left; font: inherit;
+    background: none; border: none; border-bottom: 0.5px dotted #dcdcdc; cursor: pointer;
+  }
+  .hist-day-when { font-weight: 700; }
+  .hist-day-count { margin-left: 8px; font-size: 13px; font-weight: 400; color: #6b6b6b; }
+  .hist-day-total { font-weight: 900; font-variant-numeric: tabular-nums; flex-shrink: 0; }
+  .hist-day-total.hit { color: #1b7a43; }
+
+  /* One day's items, drawn like the main list but with nothing to tap. */
+  .hist-items { list-style: none; margin-top: 8px; }
+  .hist-items li {
+    display: flex; align-items: baseline; justify-content: space-between;
+    gap: 12px; padding: 12px 0; border-bottom: 0.5px dotted #dcdcdc;
+  }
+  .hist-item-left { min-width: 0; }
+  .hist-item-name { font-weight: 700; }
+  .hist-item-amount { margin-left: 8px; font-size: 14px; color: #6b6b6b; }
+  .hist-item-grams { font-weight: 900; font-variant-numeric: tabular-nums; flex-shrink: 0; }
+  .hist-empty { padding: 20px 0; font-size: 14px; color: #6b6b6b; }
+  .hist-day:active, #history-back:active, #history-close:active { opacity: 0.5; }
 </style>
 </head>
 <body>
@@ -370,13 +421,30 @@
 
   <section class="week-section">
     <div class="rule-8"></div>
-    <div class="week-head">
+    <div class="week-head header-row">
       <span class="label-tiny">last 7 days</span>
+      <button id="history-link" class="link-btn" type="button">all history</button>
     </div>
     <div id="week"></div>
-    <p class="footnote">Estimates are approximate. Values in grams.</p>
+    <p class="footnote">Tap a bar for that day. Estimates are approximate. Values in grams.</p>
   </section>
 
+</div>
+
+<!-- Read-only history. Filled by renderHistory(): either the list of every day
+     logged, or one day's items. It is its own screen over the page, so opening
+     it neither disturbs today's view nor lengthens the scroll. -->
+<div id="history" role="dialog" aria-modal="true" aria-label="History" aria-hidden="true">
+  <div class="history-wrap">
+    <div class="history-top">
+      <button id="history-back" class="link-btn" type="button">← all days</button>
+      <button id="history-close" class="link-btn" type="button">close</button>
+    </div>
+    <h2 class="history-title" id="history-title"></h2>
+    <p class="history-sub" id="history-sub"></p>
+    <div class="rule-8"></div>
+    <div id="history-body"></div>
+  </div>
 </div>
 
 <script>
@@ -637,6 +705,27 @@ function fmt(d) {
 }
 function todayKey() { return fmt(new Date()); }
 
+// A stored day key is "YYYY-MM-DD". new Date("YYYY-MM-DD") parses as UTC midnight
+// and can slide a day either way once localised, so build a local date by parts.
+function parseKey(key) {
+  var p = String(key).split("-");
+  return new Date(Number(p[0]), Number(p[1]) - 1, Number(p[2]));
+}
+// Names for a past day, read how a person would say it: today and yesterday get
+// their words, everything else its date. Short form drops the year unless the day
+// is in another one; long form always carries it.
+function dayLabel(key, long) {
+  if (key === todayKey()) return "Today";
+  var y = new Date(); y.setDate(y.getDate() - 1);
+  if (key === fmt(y)) return "Yesterday";
+  var d = parseKey(key);
+  var opts = long
+    ? { weekday: "long", day: "numeric", month: "long", year: "numeric" }
+    : { weekday: "short", day: "numeric", month: "short" };
+  if (!long && d.getFullYear() !== new Date().getFullYear()) opts.year = "numeric";
+  return d.toLocaleDateString(undefined, opts);
+}
+
 // ---------- parsing ----------
 var PARSE_PROMPT = [
   'You are a protein estimator. The input is a casual, fuzzy description of food someone ate,',
@@ -797,6 +886,8 @@ var itemsEl = $("items"), emptyMsg = $("empty-msg"), itemsHint = $("items-hint")
 var itemsHead = $("items-head"), sortToggle = $("sort-toggle");
 var weekEl = $("week");
 var pendingEl = $("pending"), offlineNote = $("offline-note");
+var historyEl = $("history"), historyBody = $("history-body");
+var historyTitle = $("history-title"), historySub = $("history-sub");
 
 // ---------- rendering ----------
 // The three lists below all build the same create → class → text → append shape.
@@ -919,17 +1010,121 @@ function render() {
     var d = new Date();
     d.setDate(d.getDate() - i);
     var isToday = i === 0;
-    var dayTotal = isToday ? total : sumProtein(days[fmt(d)] || []);
+    var key = fmt(d);
+    var dayTotal = isToday ? total : sumProtein(days[key] || []);
 
     var bar = el("div", "day-bar" + (dayTotal >= goal ? " hit-bg" : isToday ? " today" : ""));
     bar.style.height = Math.max(3, Math.min(1, dayTotal / goal) * 56) + "px";
     bar.title = dayTotal + " g";
 
+    // The column is a button in all but tag: tap or keyboard opens the day it
+    // stands for. A closure per column is what pins each to its own date.
     var col = el("div", "day-col");
     col.appendChild(bar);
     col.appendChild(el("span", "day-label" + (isToday ? " today" : ""), labels[d.getDay()]));
+    col.setAttribute("role", "button");
+    col.setAttribute("tabindex", "0");
+    col.setAttribute("aria-label", dayLabel(key, true) + ", " + dayTotal + " g. View this day.");
+    (function (dayKey) {
+      col.addEventListener("click", function () { openHistory(dayKey); });
+      col.addEventListener("keydown", function (e) {
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openHistory(dayKey); }
+      });
+    })(key);
     weekEl.appendChild(col);
   }
+
+  // A background drain (a queued entry landing) can change a day while the
+  // history screen is open over it; keep that screen current when it is.
+  if (historyView != null) renderHistory();
+}
+
+// ---------- history (read-only) ----------
+// One piece of state: which view the overlay shows. "list" is every logged day,
+// a day key is that one day, null is closed. Nothing here writes — it only reads
+// the same localStorage the main screen does.
+var historyView = null;
+
+function openHistory(view) {
+  historyView = view;
+  renderHistory();
+  historyEl.classList.add("open");
+  historyEl.setAttribute("aria-hidden", "false");
+  historyEl.scrollTop = 0; // its own screen — start at the top however the page sat
+}
+
+function closeHistory() {
+  historyView = null;
+  historyEl.classList.remove("open");
+  historyEl.setAttribute("aria-hidden", "true");
+}
+
+function renderHistory() {
+  if (historyView == null) return;
+  var days = loadDays();
+  var goal = loadGoal();
+  var dayView = historyView !== "list";
+  historyEl.classList.toggle("day-view", dayView); // reveals the back link
+  historyBody.innerHTML = "";
+
+  if (!dayView) {
+    // Every day that holds anything, newest first. A key left empty by a deleted
+    // item is not a day you logged, so it is left out.
+    var keys = Object.keys(days)
+      .filter(function (k) { return (days[k] || []).length; })
+      .sort().reverse();
+    historyTitle.textContent = "History";
+    historySub.className = "history-sub";
+    historySub.textContent = keys.length
+      ? keys.length + (keys.length === 1 ? " day logged" : " days logged") : "";
+    if (!keys.length) {
+      historyBody.appendChild(el("p", "hist-empty", "Nothing logged yet."));
+      return;
+    }
+    var list = el("ul", "hist-list");
+    keys.forEach(function (k) {
+      var items = days[k];
+      var t = sumProtein(items);
+      var row = el("button", "hist-day");
+      row.type = "button";
+      var left = el("span", "hist-day-left");
+      left.appendChild(el("span", "hist-day-when", dayLabel(k, false)));
+      left.appendChild(el("span", "hist-day-count",
+        items.length + (items.length === 1 ? " item" : " items")));
+      row.appendChild(left);
+      row.appendChild(el("span", "hist-day-total" + (t >= goal ? " hit" : ""), t + " g"));
+      row.setAttribute("aria-label", dayLabel(k, true) + ", " + t + " grams. View this day.");
+      row.addEventListener("click", function () { openHistory(k); });
+      list.appendChild(row);
+    });
+    historyBody.appendChild(list);
+    return;
+  }
+
+  // One day. Same read the main list gives — name, amount, grams — with nothing
+  // to tap, newest first.
+  var key = historyView;
+  var items = days[key] || [];
+  var total = sumProtein(items);
+  var hit = total >= goal;
+  historyTitle.textContent = dayLabel(key, true);
+  historySub.className = "history-sub" + (hit ? " hit" : "");
+  historySub.textContent = total + " g" + (hit ? " · goal reached" : " · goal " + goal + " g");
+  if (!items.length) {
+    historyBody.appendChild(el("p", "hist-empty", "Nothing logged this day."));
+    return;
+  }
+  var ul = el("ul", "hist-items");
+  items.slice().reverse().forEach(function (it) {
+    var left = el("div", "hist-item-left");
+    left.appendChild(el("span", "hist-item-name", it.name));
+    if (it.amount) left.appendChild(el("span", "hist-item-amount", it.amount));
+    var li = el("li");
+    li.appendChild(left);
+    li.appendChild(el("span", "hist-item-grams", it.protein + " g"));
+    ul.appendChild(li);
+  });
+  historyBody.appendChild(ul);
 }
 
 // The row the user is correcting: its id, its live DOM node, and the field to
@@ -1332,6 +1527,15 @@ function saveGoal() {
   goalEdit.classList.remove("open");
   render();
 }
+
+// History: the link opens the full list, a bar opens one day (wired in render),
+// back always returns to the list, close and Escape leave.
+$("history-link").addEventListener("click", function () { openHistory("list"); });
+$("history-close").addEventListener("click", closeHistory);
+$("history-back").addEventListener("click", function () { openHistory("list"); });
+document.addEventListener("keydown", function (e) {
+  if (e.key === "Escape" && historyView != null) closeHistory();
+});
 
 // first run: no key -> open settings
 providerSelect.value = provider();

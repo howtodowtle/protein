@@ -501,6 +501,88 @@ const baseStore = () => ({ "protein.apiKey": "sk-test", "protein.provider": "ant
     check("an item with no certainty field reads as unrated", marks(h2).join() === "cert-unrated", marks(h2));
   }
 
+  // ---- 16. read-only history: full list, one day, and the ways in and out
+  {
+    console.log("16. history view");
+    // Dates relative to now so the "Today"/"Yesterday" wording is exercised.
+    const fmtD = (d) => d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
+    const ago = (n) => { const d = new Date(); d.setDate(d.getDate() - n); return fmtD(d); };
+    const seeded = {
+      [ago(0)]: [{ id: "a", name: "Eggs", amount: "4", protein: 25 }],
+      [ago(1)]: [{ id: "b", name: "Quark", amount: "200 g", protein: 19 }, { id: "c", name: "Bread", amount: "2 slices", protein: 8 }],
+      [ago(10)]: [{ id: "d", name: "Steak", amount: "200 g", protein: 52 }],
+      [ago(3)]: [],  // a key left empty by a deleted item — not a day you logged
+    };
+    const h = makeHarness({
+      store: { ...baseStore(), "protein.goal": "40", "protein.days": JSON.stringify(seeded) },
+      fetchImpl: async () => ok([]),
+    });
+    const body = () => h.els["history-body"];
+    const kids = (cls) => body().children.find((c) => c.className === cls);
+    const isOpen = () => h.els["history"].classList.contains("open");
+    const isDay = () => h.els["history"].classList.contains("day-view");
+
+    check("closed on load", !isOpen());
+
+    // The link opens the full list: newest first, empty day dropped.
+    h.els["history-link"].click();
+    check("open after link", isOpen());
+    check("list mode, not day", isOpen() && !isDay());
+    const list = kids("hist-list");
+    check("only days with items shown", list.children.length === 3, list.children.length);
+    const whens = list.children.map((r) => r.children[0].children[0].textContent);
+    check("newest first, worded", whens[0] === "Today" && whens[1] === "Yesterday", whens);
+    check("sub counts the days", h.els["history-sub"].textContent === "3 days logged", h.els["history-sub"].textContent);
+
+    // A day whose total cleared the goal marks its figure.
+    const steakRow = list.children[2];
+    check("goal-hit day flagged in the list", /hist-day-total hit/.test(steakRow.children[1].className), steakRow.children[1].className);
+
+    // Tapping a row opens that day, read-only, newest first, with no controls.
+    list.children[1].click(); // Yesterday: Quark then Bread
+    check("day-view after tap", isDay());
+    check("title is the day", h.els["history-title"].textContent === "Yesterday", h.els["history-title"].textContent);
+    const dayItems = kids("hist-items");
+    check("items newest first", dayItems.children.map((li) => li.children[0].children[0].textContent).join() === "Bread,Quark", dayItems.children.map((li) => li.children[0].children[0].textContent));
+    check("grams shown", dayItems.children.map((li) => li.children[1].textContent).join() === "8 g,19 g", dayItems.children.map((li) => li.children[1].textContent));
+    check("sub reads total vs goal", h.els["history-sub"].textContent === "27 g · goal 40 g", h.els["history-sub"].textContent);
+
+    // Back returns to the list; close leaves.
+    h.els["history-back"].click();
+    check("back to the list", isOpen() && !isDay() && !!kids("hist-list"));
+    h.els["history-close"].click();
+    check("close leaves", !isOpen());
+
+    // A week bar is the other way in: the columns run oldest→today, so the last
+    // is today, and tapping it opens today read-only.
+    const cols = h.els["week"].children;
+    check("seven columns", cols.length === 7, cols.length);
+    cols[6].click();
+    check("bar opens history", isOpen() && isDay());
+    check("today's items shown", h.els["history-title"].textContent === "Today" && kids("hist-items").children[0].children[0].children[0].textContent === "Eggs", h.els["history-title"].textContent);
+
+    // Escape closes from anywhere.
+    h.document.listeners.keydown.forEach((f) => f({ key: "Escape" }));
+    check("escape closes", !isOpen());
+
+    // A day that hit the goal reads it back in the detail sub-line.
+    h.store["protein.goal"] = "20";
+    h.ctx.openHistory(ago(0)); // today: Eggs = 25 >= 20
+    check("goal-reached wording", h.els["history-sub"].textContent === "25 g · goal reached", h.els["history-sub"].textContent);
+    check("sub marked hit", h.els["history-sub"].classList.contains("hit"), h.els["history-sub"].className);
+  }
+
+  // ---- 17. empty history states clearly
+  {
+    console.log("17. empty history");
+    const h = makeHarness({ store: baseStore(), fetchImpl: async () => ok([]) });
+    h.els["history-link"].click();
+    check("empty-list message", h.els["history-body"].children[0].textContent === "Nothing logged yet.", h.els["history-body"].children[0].textContent);
+    // A bar for a day with nothing on it still opens, and says so.
+    h.ctx.openHistory("2020-01-01");
+    check("empty-day message", h.els["history-body"].children[0].textContent === "Nothing logged this day.", h.els["history-body"].children[0].textContent);
+  }
+
   console.log("\n" + pass + " passed, " + fail + " failed");
   process.exit(fail ? 1 : 0);
 })();

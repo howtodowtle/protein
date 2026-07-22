@@ -266,15 +266,24 @@
   .week-section { margin-top: 32px; }
   .week-head { padding-top: 12px; }
   #week { display: flex; align-items: flex-end; justify-content: space-between; gap: 8px; margin-top: 12px; height: 72px; }
-  .day-col { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: flex-end; height: 100%; }
+  /* A real button, like the history rows it opens: a tap or the keyboard opens
+     that day's read-only detail, with focus and the button role for free. The
+     whole column is the target — bar plus label — so a thumb aimed at a short
+     bar still lands. Reset the chrome a button brings; the layout is the column. */
+  .day-col {
+    flex: 1; display: flex; flex-direction: column; align-items: center;
+    justify-content: flex-end; height: 100%;
+    background: none; border: none; padding: 0; font: inherit; color: inherit; cursor: pointer;
+  }
+  /* The global 44px tap-pad (button::after) is drawn for stacked text links and
+     would overhang into the gaps between columns; a full-height column is target
+     enough without it. */
+  .day-col::after { content: none; }
   .day-bar { width: 100%; background: #bdbdbd; }
   .day-bar.today { background: #111; }
   .day-bar.hit-bg { background: #1b7a43; }
   .day-label { margin-top: 4px; font-size: 12px; color: #6b6b6b; }
   .day-label.today { color: #111; font-weight: 700; }
-  /* A bar is a way into that day's read-only detail. The whole column is the
-     target — bar plus label — so a thumb aimed at a short bar still lands. */
-  .day-col { cursor: pointer; }
 
   .footnote { margin-top: 16px; font-size: 12px; color: #6b6b6b; }
 
@@ -324,7 +333,8 @@
   .hist-item-amount { margin-left: 8px; font-size: 14px; color: #6b6b6b; }
   .hist-item-grams { font-weight: 900; font-variant-numeric: tabular-nums; flex-shrink: 0; }
   .hist-empty { padding: 20px 0; font-size: 14px; color: #6b6b6b; }
-  .hist-day:active, #history-back:active, #history-close:active { opacity: 0.5; }
+  /* back and close are link-btns, already dimmed on press by the rule up top. */
+  .hist-day:active { opacity: 0.5; }
 </style>
 </head>
 <body>
@@ -1017,26 +1027,23 @@ function render() {
     bar.style.height = Math.max(3, Math.min(1, dayTotal / goal) * 56) + "px";
     bar.title = dayTotal + " g";
 
-    // The column is a button in all but tag: tap or keyboard opens the day it
-    // stands for. A closure per column is what pins each to its own date.
-    var col = el("div", "day-col");
+    // Each column is the button into its day. A closure per column pins each to
+    // its own date — key is var-scoped, so the loop would otherwise share one.
+    var col = el("button", "day-col");
+    col.type = "button";
     col.appendChild(bar);
     col.appendChild(el("span", "day-label" + (isToday ? " today" : ""), labels[d.getDay()]));
-    col.setAttribute("role", "button");
-    col.setAttribute("tabindex", "0");
     col.setAttribute("aria-label", dayLabel(key, true) + ", " + dayTotal + " g. View this day.");
     (function (dayKey) {
       col.addEventListener("click", function () { openHistory(dayKey); });
-      col.addEventListener("keydown", function (e) {
-        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openHistory(dayKey); }
-      });
     })(key);
     weekEl.appendChild(col);
   }
 
   // A background drain (a queued entry landing) can change a day while the
-  // history screen is open over it; keep that screen current when it is.
-  if (historyView != null) renderHistory();
+  // history screen is open over it; keep that screen current when it is. The
+  // days and goal render just read are reused — renderHistory no-ops when closed.
+  renderHistory(days, goal);
 }
 
 // ---------- history (read-only) ----------
@@ -1045,26 +1052,36 @@ function render() {
 // the same localStorage the main screen does.
 var historyView = null;
 
+// The overlay's three DOM flags are all derived from historyView here, in one
+// place, so shown / dialog-hidden / back-link-visible cannot drift out of step
+// with the state or with each other.
+function syncHistory() {
+  var open = historyView != null;
+  historyEl.classList.toggle("open", open);
+  historyEl.classList.toggle("day-view", open && historyView !== "list");
+  historyEl.setAttribute("aria-hidden", open ? "false" : "true");
+}
+
 function openHistory(view) {
   historyView = view;
   renderHistory();
-  historyEl.classList.add("open");
-  historyEl.setAttribute("aria-hidden", "false");
+  syncHistory();
   historyEl.scrollTop = 0; // its own screen — start at the top however the page sat
 }
 
 function closeHistory() {
   historyView = null;
-  historyEl.classList.remove("open");
-  historyEl.setAttribute("aria-hidden", "true");
+  syncHistory();
 }
 
-function renderHistory() {
+// days and goal are optional: render() passes the ones it already loaded, the
+// standalone callers let it read its own. Guarded first so the closed case pays
+// nothing.
+function renderHistory(days, goal) {
   if (historyView == null) return;
-  var days = loadDays();
-  var goal = loadGoal();
+  if (!days) days = loadDays();
+  if (goal == null) goal = loadGoal();
   var dayView = historyView !== "list";
-  historyEl.classList.toggle("day-view", dayView); // reveals the back link
   historyBody.innerHTML = "";
 
   if (!dayView) {
@@ -1074,7 +1091,7 @@ function renderHistory() {
       .filter(function (k) { return (days[k] || []).length; })
       .sort().reverse();
     historyTitle.textContent = "History";
-    historySub.className = "history-sub";
+    historySub.classList.remove("hit");
     historySub.textContent = keys.length
       ? keys.length + (keys.length === 1 ? " day logged" : " days logged") : "";
     if (!keys.length) {
@@ -1108,7 +1125,7 @@ function renderHistory() {
   var total = sumProtein(items);
   var hit = total >= goal;
   historyTitle.textContent = dayLabel(key, true);
-  historySub.className = "history-sub" + (hit ? " hit" : "");
+  historySub.classList.toggle("hit", hit);
   historySub.textContent = total + " g" + (hit ? " · goal reached" : " · goal " + goal + " g");
   if (!items.length) {
     historyBody.appendChild(el("p", "hist-empty", "Nothing logged this day."));

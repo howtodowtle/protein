@@ -569,7 +569,7 @@ const baseStore = () => ({ "protein.apiKey": "sk-test", "protein.provider": "ant
     h.store["protein.goal"] = "20";
     h.ctx.openHistory(ago(0)); // today: Eggs = 25 >= 20
     check("goal-reached wording", h.els["history-sub"].textContent === "25 g · goal reached", h.els["history-sub"].textContent);
-    check("sub marked hit", /history-sub hit/.test(h.els["history-sub"].className), h.els["history-sub"].className);
+    check("sub marked hit", h.els["history-sub"].classList.contains("hit"), h.els["history-sub"].className);
   }
 
   // ---- 17. empty history states clearly

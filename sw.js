@@ -5,7 +5,7 @@
 // online you always run the newest index.html, offline you get the last copy
 // that loaded. API calls go to other origins and are never touched.
 
-var CACHE = "protein-shell-v1";
+var CACHE = "protein-shell-v2";
 var SHELL = ["./", "./index.html", "./manifest.webmanifest", "./icon-192.png", "./icon-512.png", "./apple-touch-icon.png"];
 
 self.addEventListener("install", function (e) {

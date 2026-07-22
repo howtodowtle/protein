@@ -26,8 +26,12 @@ for spec in "icon-512.png 512" "icon-192.png 192" "apple-touch-icon.png 180"; do
   set -- $spec
   w=$(awk "BEGIN{printf \"%d\", $2 * $W}")
   h=$(awk "BEGIN{printf \"%d\", $2 * $H}")
+  # Force true-colour sRGB with no alpha. The artwork is black/white/grey, so
+  # ImageMagick would otherwise write a grayscale PNG — which browsers show fine
+  # in the tab but iOS silently refuses to render as a home-screen icon.
   magick /tmp/protein-art.png -filter Lanczos -resize "${w}x${h}!" \
-    -background white -gravity center -extent "$2x$2" -strip "$1"
+    -background white -gravity center -extent "$2x$2" \
+    -alpha off -colorspace sRGB -type TrueColor -strip "$1"
 done
 
 echo "icons written"

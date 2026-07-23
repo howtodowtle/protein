@@ -1042,8 +1042,7 @@ function render() {
   // Scale so the tallest of {each day's total, the goal} fills the bar area. The
   // goal line then rides at the top when every day is under goal, and drops to
   // make room once a day overshoots it — the overshoot is the bar above the line.
-  var scaleMax = goal;
-  for (var m = 0; m < week.length; m++) scaleMax = Math.max(scaleMax, week[m].total);
+  var scaleMax = week.reduce(function (mx, x) { return Math.max(mx, x.total); }, goal);
   if (scaleMax <= 0) scaleMax = 1;
 
   for (var w = 0; w < week.length; w++) {

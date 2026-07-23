@@ -554,9 +554,11 @@ const baseStore = () => ({ "protein.apiKey": "sk-test", "protein.provider": "ant
     check("close leaves", !isOpen());
 
     // A week bar is the other way in: the columns run oldest→today, so the last
-    // is today, and tapping it opens today read-only.
-    const cols = h.els["week"].children;
+    // is today, and tapping it opens today read-only. A dashed goal line rides
+    // over the columns as a non-column child, so filter to the seven day columns.
+    const cols = h.els["week"].children.filter((c) => c.className.includes("day-col"));
     check("seven columns", cols.length === 7, cols.length);
+    check("goal line drawn", h.els["week"].children.some((c) => c.className === "goal-line"));
     cols[6].click();
     check("bar opens history", isOpen() && isDay());
     check("today's items shown", h.els["history-title"].textContent === "Today" && kids("hist-items").children[0].children[0].children[0].textContent === "Eggs", h.els["history-title"].textContent);

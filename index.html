@@ -265,7 +265,7 @@
   /* Week chart */
   .week-section { margin-top: 32px; }
   .week-head { padding-top: 12px; }
-  #week { display: flex; align-items: flex-end; justify-content: space-between; gap: 8px; margin-top: 12px; height: 72px; }
+  #week { position: relative; display: flex; align-items: flex-end; justify-content: space-between; gap: 8px; margin-top: 12px; height: 72px; }
   /* A real button, like the history rows it opens: a tap or the keyboard opens
      that day's read-only detail, with focus and the button role for free. The
      whole column is the target — bar plus label — so a thumb aimed at a short
@@ -282,8 +282,17 @@
   .day-bar { width: 100%; background: #bdbdbd; }
   .day-bar.today { background: #111; }
   .day-bar.hit-bg { background: #1b7a43; }
-  .day-label { margin-top: 4px; font-size: 12px; color: #6b6b6b; }
+  /* A fixed label height keeps the 56px bar area exact, so the goal line lands
+     where the JS puts it. 12 + 4 margin = 16, leaving 72 − 16 = 56 for bars. */
+  .day-label { margin-top: 4px; font-size: 12px; line-height: 12px; color: #6b6b6b; }
   .day-label.today { color: #111; font-weight: 700; }
+  /* The goal drawn across the chart. Absolute so it sits over the columns
+     without touching their layout; pointer-events off so taps fall through to
+     the day buttons underneath. Its bottom offset is set per-render in JS. */
+  .goal-line {
+    position: absolute; left: 0; right: 0; height: 0;
+    border-top: 1px dashed #9a9a9a; pointer-events: none;
+  }
 
   .footnote { margin-top: 16px; font-size: 12px; color: #6b6b6b; }
 
@@ -436,7 +445,7 @@
       <button id="history-link" class="link-btn" type="button">all history</button>
     </div>
     <div id="week"></div>
-    <p class="footnote">Tap a bar for that day. Estimates are approximate. Values in grams.</p>
+    <p class="footnote">Tap a bar for that day. The dashed line is your goal. Estimates are approximate. Values in grams.</p>
   </section>
 
 </div>
@@ -1016,15 +1025,32 @@ function render() {
   // week chart
   weekEl.innerHTML = "";
   var labels = ["S", "M", "T", "W", "T", "F", "S"];
+  var BAR_AREA = 56, LABEL_H = 16; // px; must match the CSS (72px column − 16 label)
+
+  // First pass: collect the seven days so the bars can scale to the actual range
+  // rather than clamp at the goal. Two days that both clear the goal used to draw
+  // the same full-height bar; now a bigger day draws a taller one.
+  var week = [];
   for (var i = 6; i >= 0; i--) {
     var d = new Date();
     d.setDate(d.getDate() - i);
     var isToday = i === 0;
     var key = fmt(d);
-    var dayTotal = isToday ? total : sumProtein(days[key] || []);
+    week.push({ d: d, key: key, isToday: isToday, total: isToday ? total : sumProtein(days[key] || []) });
+  }
+
+  // Scale so the tallest of {each day's total, the goal} fills the bar area. The
+  // goal line then rides at the top when every day is under goal, and drops to
+  // make room once a day overshoots it — the overshoot is the bar above the line.
+  var scaleMax = week.reduce(function (mx, x) { return Math.max(mx, x.total); }, goal);
+  if (scaleMax <= 0) scaleMax = 1;
+
+  for (var w = 0; w < week.length; w++) {
+    var day = week[w], dayTotal = day.total, isToday = day.isToday, key = day.key;
 
     var bar = el("div", "day-bar" + (dayTotal >= goal ? " hit-bg" : isToday ? " today" : ""));
-    bar.style.height = Math.max(3, Math.min(1, dayTotal / goal) * 56) + "px";
+    // A 3px stub keeps every day visible, even an empty one, as it was before.
+    bar.style.height = Math.max(3, (dayTotal / scaleMax) * BAR_AREA) + "px";
     bar.title = dayTotal + " g";
 
     // Each column is the button into its day. A closure per column pins each to
@@ -1032,13 +1058,21 @@ function render() {
     var col = el("button", "day-col");
     col.type = "button";
     col.appendChild(bar);
-    col.appendChild(el("span", "day-label" + (isToday ? " today" : ""), labels[d.getDay()]));
+    col.appendChild(el("span", "day-label" + (isToday ? " today" : ""), labels[day.d.getDay()]));
     col.setAttribute("aria-label", dayLabel(key, true) + ", " + dayTotal + " g. View this day.");
     (function (dayKey) {
       col.addEventListener("click", function () { openHistory(dayKey); });
     })(key);
     weekEl.appendChild(col);
   }
+
+  // The goal, drawn once across all seven columns. Sits BAR_AREA·(goal/scaleMax)
+  // above the bars' baseline, which itself sits LABEL_H above the column bottom.
+  var goalLine = el("div", "goal-line");
+  goalLine.style.bottom = (LABEL_H + (goal / scaleMax) * BAR_AREA) + "px";
+  goalLine.setAttribute("aria-hidden", "true");
+  goalLine.title = "goal " + goal + " g";
+  weekEl.appendChild(goalLine);
 
   // A background drain (a queued entry landing) can change a day while the
   // history screen is open over it; keep that screen current when it is. The

@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#ffffff">
-<meta name="description" content="Type what you ate in plain language, get grams of protein.">
+<meta name="description" content="Type what you ate in plain language, get grams of protein and calories.">
 <title>Fuzzy Protein</title>
 <link rel="manifest" href="./manifest.webmanifest">
 <link rel="icon" type="image/png" href="./icon-192.png">
@@ -118,6 +118,19 @@
     background: #111; color: #fff; border: none; font: inherit; font-weight: 700;
     padding: 8px 14px; cursor: pointer; font-size: 14px;
   }
+
+  /* Metric switch — Protein | Calories. Swaps the whole screen between the two
+     figures the one model call returns; the active segment is filled, matching the
+     nutrition-label look of the solid buttons. */
+  .metric-toggle { display: flex; border: 2px solid #111; margin: 0 0 16px; }
+  .metric-seg {
+    flex: 1; background: #fff; color: #111; border: none; font: inherit;
+    font-weight: 700; font-size: 13px; text-transform: uppercase; letter-spacing: 0.1em;
+    padding: 9px 0; cursor: pointer;
+  }
+  .metric-seg + .metric-seg { border-left: 2px solid #111; }
+  .metric-seg.active { background: #111; color: #fff; }
+  .metric-seg:active { opacity: 0.75; }
 
   /* Total vs goal */
   .total-section { padding-top: 16px; }
@@ -394,12 +407,16 @@
   </section>
 
   <section class="total-section">
+    <div class="metric-toggle" role="group" aria-label="Track protein or calories">
+      <button id="metric-protein" class="metric-seg active" type="button">Protein</button>
+      <button id="metric-calories" class="metric-seg" type="button">Calories</button>
+    </div>
     <div class="total-row">
       <div>
         <div class="label-tiny">today</div>
         <div id="total">0<span class="unit"> g</span></div>
       </div>
-      <div class="goal-area">
+      <div class="goal-area" id="goal-area">
         <div id="goal-edit">
           <input id="goal-input" type="number" min="1" inputmode="numeric">
           <button id="goal-save" class="btn-solid" type="button">Set</button>
@@ -445,7 +462,7 @@
       <button id="history-link" class="link-btn" type="button">all history</button>
     </div>
     <div id="week"></div>
-    <p class="footnote">Tap a bar for that day. The dashed line is your goal. Estimates are approximate. Values in grams.</p>
+    <p class="footnote" id="week-note">Tap a bar for that day. The dashed line is your goal. Estimates are approximate. Values in grams.</p>
   </section>
 
 </div>
@@ -616,6 +633,7 @@ var KEY_DAYS = "protein.days";
 var KEY_PROVIDER = "protein.provider";
 var KEY_QUEUE = "protein.queue";
 var KEY_SORT = "protein.sort";
+var KEY_METRIC = "protein.metric";
 var MAX_ATTEMPTS = 3;
 var STORAGE_FAIL = "Saving failed — storage unavailable.";
 
@@ -700,6 +718,26 @@ var CERT_LABELS = { high: "sure", medium: "fairly sure", low: "not sure" };
 var CERTAINTY = Object.keys(CERT_LABELS);
 function certRank(v) { return CERTAINTY.indexOf(v) + 1; }
 
+// The one model call returns two figures per item — protein and calories — and the
+// app shows one at a time. Everything downstream (total, list, certainty, sort, week
+// chart, history, the item editor) reads the active metric from here rather than
+// naming a field, so the calorie screen reuses the protein machinery whole. The lone
+// asymmetry is the goal: protein has one; calories, for now, is tracking-only.
+//   field   — the per-item number this metric sums and shows
+//   certKey — the per-item certainty word for that figure
+//   noun    — how the "most X" sort names it
+//   goal    — whether this metric has a target (and so a goal bar and goal line)
+var METRICS = {
+  protein:  { field: "protein",  unit: "g",    certKey: "certainty",        noun: "protein",  goal: true },
+  calories: { field: "calories", unit: "kcal", certKey: "calorieCertainty", noun: "calories", goal: false }
+};
+// Unknown or hand-edited value falls back to protein, the same way loadSort does.
+function loadMetric() {
+  var v = localStorage.getItem(KEY_METRIC);
+  return METRICS[v] ? v : "protein";
+}
+var viewMetric = loadMetric();
+
 // ---------- queue ----------
 // Every submission lands here first and is only removed once it has been parsed
 // and written into a day. One code path online and off, and nothing is lost if
@@ -747,26 +785,31 @@ function dayLabel(key, long) {
 
 // ---------- parsing ----------
 var PARSE_PROMPT = [
-  'You are a protein estimator. The input is a casual, fuzzy description of food someone ate,',
-  'in any language, with vague amounts allowed. Split it into items and estimate the grams of',
-  'protein in each, using realistic metric portions.',
+  'You are a protein and calorie estimator. The input is a casual, fuzzy description of food',
+  'someone ate, in any language, with vague amounts allowed. Split it into items and estimate,',
+  'for each, both the grams of protein and the calories (kcal), using realistic metric portions.',
   '',
   'Rules:',
   '- Respond with ONLY a raw JSON array. No markdown fences, no prose, no text before or after.',
-  '- Schema: [{"name": string, "amount": string, "protein_g": number, "certainty": "high"|"medium"|"low"}]',
+  '- Schema: [{"name": string, "amount": string, "protein_g": number, "certainty": "high"|"medium"|"low", "calories_kcal": number, "calorie_certainty": "high"|"medium"|"low"}]',
   '- protein_g is a whole number >= 0 for the whole stated amount, not per unit.',
-  '- One object per food mentioned, in the order mentioned. Never merge items and never drop one:',
-  '  list near-zero foods (butter, oil, most vegetables) with protein_g 0.',
+  '- calories_kcal is a whole number >= 0 for the whole stated amount, not per unit — the same',
+  '  food, judged the same way, just for energy instead of protein.',
+  '- One object per food mentioned, in the order mentioned. Never merge items and never drop one.',
+  '  A food near zero on one axis still gets a row: butter and oil are ~0 g protein but far from',
+  '  0 kcal; water, black coffee and tea are ~0 kcal but still listed.',
   '- amount is short and concrete and states the metric weight you assumed, e.g. "3 slices, ~135 g".',
   '- Resolve fuzzy units to typical portions: slice of bread ~45 g, spoon ~15 g, handful ~30 g,',
-  '  bowl ~250 g, glass ~200 ml, "a bit" / "a little" ~10 g.',
+  '  bowl ~250 g, glass ~200 ml, "a bit" / "a little" ~10 g. The same portion feeds both numbers.',
   '- A gram figure is the weight of the food unless it is explicitly called protein',
   '  (protein, Eiweiss, EW). A stated protein figure is useful evidence — often it is read off',
-  '  the packaging — so let it carry real weight, and multiply it out if it is per unit. But the',
-  '  answer is yours: never just pass a number through. Judge it against the food first.',
+  '  the packaging — so let it carry real weight, and multiply it out if it is per unit. A stated',
+  '  calorie figure (kcal, cal, Kalorien) is the same kind of evidence for calories_kcal. But the',
+  '  answer is yours: never just pass a number through. Judge it against the food first. A stated',
+  '  protein says little about the calories, and the reverse — pin each figure on its own.',
   '- Sanity-check every number against what you know about that specific food. If a figure is not',
   '  plausible for it, something was misread (often a weight taken for protein, or the user simply',
-  '  got it wrong) — go with your own estimate. Round to the nearest whole gram.',
+  '  got it wrong) — go with your own estimate. Round to the nearest whole gram and whole kcal.',
   '- Name the food the user named. Do not upgrade or specialise it: "1 Riegel mit 7 g Protein"',
   '  is a "Riegel", not a "Proteinriegel".',
   '- Keep names short and capitalized. Keep the local name for regional products (Bauernbrot, Magerquark).',
@@ -780,36 +823,43 @@ var PARSE_PROMPT = [
   '    "3 slices of camembert"  -> low     slice size unknown and camembert varies',
   '  Two things make an item certain whatever its amount: a protein figure the user read off',
   '  the packaging, and a food with essentially no protein (butter, oil) — both are "high".',
+  '- calorie_certainty is the same judgement for calories_kcal, made independently: (a) is the',
+  '  quantity pinned down, (b) is the calorie density of that food narrow or does it range widely.',
+  '  It often differs from certainty for the very same item: a splash of oil is a sure 0 g protein',
+  '  ("high") but its calories hinge on exactly how much oil ("low"); a plain "joghurt" pins its',
+  '  protein but its calories swing with the fat ("medium"). A calorie figure read off the',
+  '  packaging is "high".',
   '',
   'Example input: "4 fried eggs, 3 slices of Bauernbrot, a bit of butter, and 2 thin slices of camembert"',
   'Example output:',
-  '[{"name":"Fried eggs","amount":"4 eggs, ~220 g","protein_g":25,"certainty":"high"},',
-  ' {"name":"Bauernbrot","amount":"3 slices, ~135 g","protein_g":10,"certainty":"medium"},',
-  ' {"name":"Butter","amount":"~10 g","protein_g":0,"certainty":"high"},',
-  ' {"name":"Camembert","amount":"2 thin slices, ~40 g","protein_g":8,"certainty":"low"}]',
+  '[{"name":"Fried eggs","amount":"4 eggs, ~220 g","protein_g":25,"certainty":"high","calories_kcal":360,"calorie_certainty":"high"},',
+  ' {"name":"Bauernbrot","amount":"3 slices, ~135 g","protein_g":10,"certainty":"medium","calories_kcal":340,"calorie_certainty":"medium"},',
+  ' {"name":"Butter","amount":"~10 g","protein_g":0,"certainty":"high","calories_kcal":72,"calorie_certainty":"medium"},',
+  ' {"name":"Camembert","amount":"2 thin slices, ~40 g","protein_g":8,"certainty":"low","calories_kcal":120,"calorie_certainty":"low"}]',
   '',
   'Example input: "250 g joghurt + 200 g magerquark"',
   'Example output:',
-  '[{"name":"Joghurt","amount":"250 g","protein_g":11,"certainty":"high"},',
-  ' {"name":"Magerquark","amount":"200 g","protein_g":19,"certainty":"high"}]',
+  '[{"name":"Joghurt","amount":"250 g","protein_g":11,"certainty":"high","calories_kcal":150,"calorie_certainty":"medium"},',
+  ' {"name":"Magerquark","amount":"200 g","protein_g":19,"certainty":"high","calories_kcal":135,"calorie_certainty":"high"}]',
   '',
-  'Example input: "1 riegel mit 7.3 g protein"   (protein stated, so use it)',
+  'Example input: "1 riegel mit 7.3 g protein"   (protein stated, so use it; calories still yours)',
   'Example output:',
-  '[{"name":"Riegel","amount":"1 Riegel","protein_g":7,"certainty":"high"}]',
+  '[{"name":"Riegel","amount":"1 Riegel","protein_g":7,"certainty":"high","calories_kcal":150,"calorie_certainty":"low"}]',
   '',
-  'These four inputs all describe the same meal and must all give the same protein figure.',
-  'A slice of Bündnerfleisch weighs about 6 g and holds about 2.5 g of protein, so 4 slices',
-  'are ~24 g of meat and ~10 g of protein — whether the user states the weight, the protein,',
-  'or nothing at all. The figure is the same in all four; only how much was guessed differs,',
-  'which is exactly what certainty records:',
-  '  "4 scheiben bündnerfleisch"                        -> [{"name":"Bündnerfleisch","amount":"4 Scheiben, ~24 g","protein_g":10,"certainty":"medium"}]',
-  '  "4 scheiben bündnerfleisch zu je 6 g"              -> [{"name":"Bündnerfleisch","amount":"4 Scheiben, 24 g","protein_g":10,"certainty":"high"}]',
-  '  "4 scheiben bündnerfleisch mit je 2.5 g protein"   -> [{"name":"Bündnerfleisch","amount":"4 Scheiben, ~24 g","protein_g":10,"certainty":"high"}]',
-  '  "bündnerfleisch mit 10 g protein"                  -> [{"name":"Bündnerfleisch","amount":"~24 g","protein_g":10,"certainty":"high"}]',
+  'These four inputs all describe the same meal and must all give the same protein figure and the',
+  'same calorie figure. A slice of Bündnerfleisch weighs about 6 g and holds about 2.5 g of protein',
+  'and about 9 kcal, so 4 slices are ~24 g of meat, ~10 g of protein and ~38 kcal — whether the user',
+  'states the weight, the protein, or nothing at all. Both figures are the same in all four; only how',
+  'much was guessed differs, and it can differ per figure: a stated protein pins certainty but not',
+  'calorie_certainty.',
+  '  "4 scheiben bündnerfleisch"                        -> [{"name":"Bündnerfleisch","amount":"4 Scheiben, ~24 g","protein_g":10,"certainty":"medium","calories_kcal":38,"calorie_certainty":"medium"}]',
+  '  "4 scheiben bündnerfleisch zu je 6 g"              -> [{"name":"Bündnerfleisch","amount":"4 Scheiben, 24 g","protein_g":10,"certainty":"high","calories_kcal":38,"calorie_certainty":"high"}]',
+  '  "4 scheiben bündnerfleisch mit je 2.5 g protein"   -> [{"name":"Bündnerfleisch","amount":"4 Scheiben, ~24 g","protein_g":10,"certainty":"high","calories_kcal":38,"calorie_certainty":"medium"}]',
+  '  "bündnerfleisch mit 10 g protein"                  -> [{"name":"Bündnerfleisch","amount":"~24 g","protein_g":10,"certainty":"high","calories_kcal":38,"calorie_certainty":"low"}]',
   '',
   'Example input: "1 scheibe brot mit 40 g protein"   (impossible for one slice, so estimate it)',
   'Example output:',
-  '[{"name":"Brot","amount":"1 Scheibe, ~45 g","protein_g":4,"certainty":"medium"}]',
+  '[{"name":"Brot","amount":"1 Scheibe, ~45 g","protein_g":4,"certainty":"medium","calories_kcal":115,"calorie_certainty":"medium"}]',
   '',
   'Now do the same for this input: '
 ].join("\n");
@@ -884,9 +934,12 @@ async function parseFood(text) {
         name: x.name,
         amount: String(x.amount == null ? "" : x.amount),
         protein: Math.max(0, Math.round(Number(x.protein_g) || 0)),
+        calories: Math.max(0, Math.round(Number(x.calories_kcal) || 0)),
         // Kept as the word the model sent, not as a rank: the rank is a display
         // decision, and a later feature may want to tell "sure" from "silent".
-        certainty: CERTAINTY.indexOf(x.certainty) < 0 ? "" : x.certainty
+        // Each figure carries its own — they are judged independently.
+        certainty: CERTAINTY.indexOf(x.certainty) < 0 ? "" : x.certainty,
+        calorieCertainty: CERTAINTY.indexOf(x.calorie_certainty) < 0 ? "" : x.calorie_certainty
       };
     });
 }
@@ -900,10 +953,12 @@ var thinkingSelect = $("thinking-select"), effortInput = $("effort-input");
 var effortOptions = $("effort-options");
 var totalEl = $("total"), goalShow = $("goal-show"), goalEdit = $("goal-edit"), goalInput = $("goal-input");
 var barFill = $("bar-fill"), goalMsg = $("goal-msg");
+var goalArea = $("goal-area"), barTrack = $("bar-track");
+var metricProteinBtn = $("metric-protein"), metricCaloriesBtn = $("metric-calories");
 var foodInput = $("food-input"), logBtn = $("log-btn"), errorEl = $("error");
 var itemsEl = $("items"), emptyMsg = $("empty-msg"), itemsHint = $("items-hint");
 var itemsHead = $("items-head"), sortToggle = $("sort-toggle");
-var weekEl = $("week");
+var weekEl = $("week"), weekNote = $("week-note");
 var pendingEl = $("pending"), offlineNote = $("offline-note");
 var historyEl = $("history"), historyBody = $("history-body");
 var historyTitle = $("history-title"), historySub = $("history-sub");
@@ -923,8 +978,10 @@ function delButton(cls, label, onClick) {
   b.addEventListener("click", onClick);
   return b;
 }
-function sumProtein(items) {
-  return items.reduce(function (s, i) { return s + i.protein; }, 0);
+// Sum one metric's field across a day's items. A field that is missing — an item
+// logged before calories existed, say — counts as 0, the same way the row draws it.
+function sumField(items, field) {
+  return items.reduce(function (s, i) { return s + (i[field] || 0); }, 0);
 }
 
 // Items carry no timestamp: a day is stored in the order things were logged, so
@@ -932,11 +989,13 @@ function sumProtein(items) {
 // first and leaves storage — and the drain's append — untouched. Sorting that
 // copy by grams is stable, so equal amounts stay newest first too — and so do
 // equally sure items.
-function sortItems(items, mode) {
+// mode "protein" is the amount sort — it orders by whichever metric is on screen
+// (m.field), so it reads "most protein" or "most calories" without a second mode.
+function sortItems(items, mode, m) {
   var out = items.slice().reverse();
-  if (mode === "protein") out.sort(function (a, b) { return b.protein - a.protein; });
+  if (mode === "protein") out.sort(function (a, b) { return (b[m.field] || 0) - (a[m.field] || 0); });
   // Least sure first: this order exists to be worked down and emptied.
-  else if (mode === "certainty") out.sort(function (a, b) { return certRank(b.certainty) - certRank(a.certainty); });
+  else if (mode === "certainty") out.sort(function (a, b) { return certRank(b[m.certKey]) - certRank(a[m.certKey]); });
   return out;
 }
 
@@ -946,11 +1005,19 @@ function showError(msg) {
 }
 
 function render() {
+  var m = METRICS[viewMetric];
   var days = loadDays();
   var goal = loadGoal();
   var items = days[todayKey()] || [];
-  var total = sumProtein(items);
-  var hit = total >= goal;
+  var total = sumField(items, m.field);
+  var hit = m.goal && total >= goal;
+
+  // metric switch: light the active segment, and show the goal block only for a
+  // metric that has a goal — calories are tracking-only for now.
+  metricProteinBtn.classList.toggle("active", viewMetric === "protein");
+  metricCaloriesBtn.classList.toggle("active", viewMetric === "calories");
+  goalArea.style.display = m.goal ? "" : "none";
+  barTrack.style.display = m.goal ? "" : "none";
 
   // date
   $("date-label").textContent = new Date().toLocaleDateString(undefined, {
@@ -958,10 +1025,10 @@ function render() {
   });
 
   // total + goal
-  totalEl.innerHTML = total + '<span class="unit"> g</span>';
+  totalEl.innerHTML = total + '<span class="unit"> ' + m.unit + '</span>';
   totalEl.classList.toggle("hit", hit);
   goalShow.textContent = "goal " + goal + " g";
-  var pct = Math.min(100, (total / goal) * 100);
+  var pct = goal > 0 ? Math.min(100, (total / goal) * 100) : 0;
   barFill.style.width = pct + "%";
   barFill.classList.toggle("hit-bg", hit);
   goalMsg.style.display = hit ? "block" : "none";
@@ -978,15 +1045,17 @@ function render() {
   // A rule nobody can read is decoration, so the hint explains itself the moment
   // a row is drawn as anything but certain — and goes back to the plain
   // instruction once the last of them has been corrected away.
-  itemsHint.textContent = items.some(function (i) { return i.certainty !== CERTAINTY[0]; })
+  itemsHint.textContent = items.some(function (i) { return i[m.certKey] !== CERTAINTY[0]; })
     ? "Dotted means less certain — tap to fix."
-    : "Tap an item to fix its name, amount or grams.";
+    : "Tap an item to fix its name, amount or number.";
   // One item cannot be out of order, so the control only earns its space at two.
   itemsHead.style.display = items.length > 1 ? "flex" : "none";
   var sort = loadSort();
-  sortToggle.textContent = SORT_LABELS[sort];
+  // The amount sort names the metric on screen ("most protein" / "most calories");
+  // the other two modes read the same either way.
+  sortToggle.textContent = sort === "protein" ? "most " + m.noun : SORT_LABELS[sort];
   sortToggle.setAttribute("aria-label", "Sort: " + sortToggle.textContent + ". Tap to change.");
-  sortItems(items, sort).forEach(function (it) {
+  sortItems(items, sort, m).forEach(function (it) {
     // A row being edited is moved, not rebuilt: a background render (a queued
     // entry draining, say) must not wipe out half-typed text or steal focus.
     if (it.id === editingId) {
@@ -999,13 +1068,13 @@ function render() {
     if (it.amount) left.appendChild(el("span", "item-amount", it.amount));
 
     var right = el("div", "item-right");
-    var grams = el("span", "item-grams", it.protein + " g");
+    var grams = el("span", "item-grams", (it[m.field] || 0) + " " + m.unit);
     right.appendChild(grams);
     right.appendChild(delButton("item-del", "Remove " + it.name, function () { removeItem(it.id); }));
 
     // Every row is drawn, including the ones that said nothing — an item with
     // no answer is dotted end to end, which is what "no answer" looks like.
-    var li = el("li", "cert-" + (it.certainty || "unrated"));
+    var li = el("li", "cert-" + (it[m.certKey] || "unrated"));
     li.appendChild(left);
     li.appendChild(right);
     var edit = function () { startEdit(it.id); };
@@ -1036,22 +1105,23 @@ function render() {
     d.setDate(d.getDate() - i);
     var isToday = i === 0;
     var key = fmt(d);
-    week.push({ d: d, key: key, isToday: isToday, total: isToday ? total : sumProtein(days[key] || []) });
+    week.push({ d: d, key: key, isToday: isToday, total: isToday ? total : sumField(days[key] || [], m.field) });
   }
 
   // Scale so the tallest of {each day's total, the goal} fills the bar area. The
   // goal line then rides at the top when every day is under goal, and drops to
   // make room once a day overshoots it — the overshoot is the bar above the line.
-  var scaleMax = week.reduce(function (mx, x) { return Math.max(mx, x.total); }, goal);
+  // Calories have no goal to make room for, so they scale against the days alone.
+  var scaleMax = week.reduce(function (mx, x) { return Math.max(mx, x.total); }, m.goal ? goal : 0);
   if (scaleMax <= 0) scaleMax = 1;
 
   for (var w = 0; w < week.length; w++) {
     var day = week[w], dayTotal = day.total, isToday = day.isToday, key = day.key;
 
-    var bar = el("div", "day-bar" + (dayTotal >= goal ? " hit-bg" : isToday ? " today" : ""));
+    var bar = el("div", "day-bar" + (m.goal && dayTotal >= goal ? " hit-bg" : isToday ? " today" : ""));
     // A 3px stub keeps every day visible, even an empty one, as it was before.
     bar.style.height = Math.max(3, (dayTotal / scaleMax) * BAR_AREA) + "px";
-    bar.title = dayTotal + " g";
+    bar.title = dayTotal + " " + m.unit;
 
     // Each column is the button into its day. A closure per column pins each to
     // its own date — key is var-scoped, so the loop would otherwise share one.
@@ -1059,7 +1129,7 @@ function render() {
     col.type = "button";
     col.appendChild(bar);
     col.appendChild(el("span", "day-label" + (isToday ? " today" : ""), labels[day.d.getDay()]));
-    col.setAttribute("aria-label", dayLabel(key, true) + ", " + dayTotal + " g. View this day.");
+    col.setAttribute("aria-label", dayLabel(key, true) + ", " + dayTotal + " " + m.unit + ". View this day.");
     (function (dayKey) {
       col.addEventListener("click", function () { openHistory(dayKey); });
     })(key);
@@ -1068,11 +1138,19 @@ function render() {
 
   // The goal, drawn once across all seven columns. Sits BAR_AREA·(goal/scaleMax)
   // above the bars' baseline, which itself sits LABEL_H above the column bottom.
-  var goalLine = el("div", "goal-line");
-  goalLine.style.bottom = (LABEL_H + (goal / scaleMax) * BAR_AREA) + "px";
-  goalLine.setAttribute("aria-hidden", "true");
-  goalLine.title = "goal " + goal + " g";
-  weekEl.appendChild(goalLine);
+  // Only the metric that has a goal draws it; calories have none to draw.
+  if (m.goal) {
+    var goalLine = el("div", "goal-line");
+    goalLine.style.bottom = (LABEL_H + (goal / scaleMax) * BAR_AREA) + "px";
+    goalLine.setAttribute("aria-hidden", "true");
+    goalLine.title = "goal " + goal + " g";
+    weekEl.appendChild(goalLine);
+  }
+
+  // The footnote follows the metric: no dashed goal line to explain for calories.
+  weekNote.textContent = m.goal
+    ? "Tap a bar for that day. The dashed line is your goal. Estimates are approximate. Values in grams."
+    : "Tap a bar for that day. Estimates are approximate. Values in kcal.";
 
   // A background drain (a queued entry landing) can change a day while the
   // history screen is open over it; keep that screen current when it is. The
@@ -1115,6 +1193,8 @@ function renderHistory(days, goal) {
   if (historyView == null) return;
   if (!days) days = loadDays();
   if (goal == null) goal = loadGoal();
+  // Mirrors the metric of the screen behind it, read live so the two stay in step.
+  var m = METRICS[viewMetric];
   var dayView = historyView !== "list";
   historyBody.innerHTML = "";
 
@@ -1135,7 +1215,7 @@ function renderHistory(days, goal) {
     var list = el("ul", "hist-list");
     keys.forEach(function (k) {
       var items = days[k];
-      var t = sumProtein(items);
+      var t = sumField(items, m.field);
       var row = el("button", "hist-day");
       row.type = "button";
       var left = el("span", "hist-day-left");
@@ -1143,8 +1223,8 @@ function renderHistory(days, goal) {
       left.appendChild(el("span", "hist-day-count",
         items.length + (items.length === 1 ? " item" : " items")));
       row.appendChild(left);
-      row.appendChild(el("span", "hist-day-total" + (t >= goal ? " hit" : ""), t + " g"));
-      row.setAttribute("aria-label", dayLabel(k, true) + ", " + t + " grams. View this day.");
+      row.appendChild(el("span", "hist-day-total" + (m.goal && t >= goal ? " hit" : ""), t + " " + m.unit));
+      row.setAttribute("aria-label", dayLabel(k, true) + ", " + t + " " + m.unit + ". View this day.");
       row.addEventListener("click", function () { openHistory(k); });
       list.appendChild(row);
     });
@@ -1156,11 +1236,14 @@ function renderHistory(days, goal) {
   // to tap, newest first.
   var key = historyView;
   var items = days[key] || [];
-  var total = sumProtein(items);
-  var hit = total >= goal;
+  var total = sumField(items, m.field);
+  var hit = m.goal && total >= goal;
   historyTitle.textContent = dayLabel(key, true);
   historySub.classList.toggle("hit", hit);
-  historySub.textContent = total + " g" + (hit ? " · goal reached" : " · goal " + goal + " g");
+  // Protein reads its total against the goal; calories, tracking-only, just state it.
+  historySub.textContent = m.goal
+    ? total + " g" + (hit ? " · goal reached" : " · goal " + goal + " g")
+    : total + " " + m.unit;
   if (!items.length) {
     historyBody.appendChild(el("p", "hist-empty", "Nothing logged this day."));
     return;
@@ -1172,7 +1255,7 @@ function renderHistory(days, goal) {
     if (it.amount) left.appendChild(el("span", "hist-item-amount", it.amount));
     var li = el("li");
     li.appendChild(left);
-    li.appendChild(el("span", "hist-item-grams", it.protein + " g"));
+    li.appendChild(el("span", "hist-item-grams", (it[m.field] || 0) + " " + m.unit));
     ul.appendChild(li);
   });
   historyBody.appendChild(ul);
@@ -1194,20 +1277,23 @@ function editField(cls, type, value) {
 }
 
 function editRow(it) {
+  // The editor works on the metric on screen; the other figure is carried across
+  // untouched by updateItem's merge, so fixing calories never disturbs protein.
+  var m = METRICS[viewMetric];
   var name = editField("edit-name", "text", it.name);
   name.setAttribute("aria-label", "Name");
   var amount = editField("edit-amount", "text", it.amount);
   amount.placeholder = "amount";
   amount.setAttribute("aria-label", "Amount");
-  var grams = editField("edit-grams", "number", it.protein);
+  var grams = editField("edit-grams", "number", it[m.field] || 0);
   grams.min = "0";
   grams.setAttribute("inputmode", "numeric");
-  grams.setAttribute("aria-label", "Grams of protein");
+  grams.setAttribute("aria-label", m.field === "protein" ? "Grams of protein" : "Calories");
 
   // How sure the row is, next to the number it describes, cycling on tap like
   // the sort control above. An item the model made no claim about opens as
   // certain: a person who went in and saved the row has looked at it.
-  var cert = CERTAINTY.indexOf(it.certainty) < 0 ? CERTAINTY[0] : it.certainty;
+  var cert = CERTAINTY.indexOf(it[m.certKey]) < 0 ? CERTAINTY[0] : it[m.certKey];
   var certBtn = el("button", "link-btn cert-btn", CERT_LABELS[cert]);
   certBtn.type = "button";
   certBtn.setAttribute("aria-label", "How sure this is. Tap to change.");
@@ -1225,12 +1311,12 @@ function editRow(it) {
     var n = name.value.trim();
     // An unnamed item would be unidentifiable in the list; keep the user here.
     if (!n) { name.focus(); return; }
-    updateItem(it.id, {
-      name: n,
-      amount: amount.value.trim(),
-      protein: Math.max(0, Math.round(Number(grams.value) || 0)),
-      certainty: cert
-    });
+    // Only this metric's number and certainty are written; the merge in updateItem
+    // leaves the other figure exactly as it was.
+    var fields = { name: n, amount: amount.value.trim() };
+    fields[m.field] = Math.max(0, Math.round(Number(grams.value) || 0));
+    fields[m.certKey] = cert;
+    updateItem(it.id, fields);
   }
   save.addEventListener("click", commit);
   cancel.addEventListener("click", stopEdit);
@@ -1249,7 +1335,7 @@ function editRow(it) {
   // field to its left holds a number too, and this is the one that moves the total.
   var howMuch = el("div", "edit-row");
   howMuch.appendChild(grams);
-  howMuch.appendChild(el("span", "edit-unit", "g"));
+  howMuch.appendChild(el("span", "edit-unit", m.unit));
   howMuch.appendChild(certBtn);
   howMuch.appendChild(actions);
 
@@ -1561,6 +1647,17 @@ sortToggle.addEventListener("click", function () {
   try { localStorage.setItem(KEY_SORT, next); } catch (e) {}
   render();
 });
+
+// Switch which figure the whole screen shows. The choice is remembered, so the app
+// reopens on the metric you left it on.
+function setMetric(id) {
+  if (!METRICS[id] || id === viewMetric) return;
+  viewMetric = id;
+  try { localStorage.setItem(KEY_METRIC, id); } catch (e) {}
+  render();
+}
+metricProteinBtn.addEventListener("click", function () { setMetric("protein"); });
+metricCaloriesBtn.addEventListener("click", function () { setMetric("calories"); });
 
 goalShow.addEventListener("click", function () {
   goalInput.value = loadGoal();

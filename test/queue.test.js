@@ -585,6 +585,133 @@ const baseStore = () => ({ "protein.apiKey": "sk-test", "protein.provider": "ant
     check("empty-day message", h.els["history-body"].children[0].textContent === "Nothing logged this day.", h.els["history-body"].children[0].textContent);
   }
 
+  // The grams span of a rendered row (right column, first child), text and class.
+  const firstFigure = (h) => h.els["items"].children[0].children[1].children[0].textContent;
+
+  // ---- 18. calories parse into their own fields, alongside protein
+  {
+    console.log("18. calories stored");
+    const h = makeHarness({
+      store: baseStore(),
+      fetchImpl: async () => ok([{ name: "Eggs", amount: "4", protein_g: 25, certainty: "high", calories_kcal: 360, calorie_certainty: "high" }]),
+    });
+    h.els["food-input"].value = "4 eggs";
+    h.els["log-btn"].click();
+    await settle();
+    const it = Object.values(days(h))[0][0];
+    check("protein stored", it.protein === 25, it);
+    check("calories stored", it.calories === 360, it);
+    check("calorie certainty stored", it.calorieCertainty === "high", it);
+  }
+
+  // ---- 19. an item without calorie fields defaults cleanly (old data, or a
+  //          model that answered only protein)
+  {
+    console.log("19. calories default when absent");
+    const h = makeHarness({ store: baseStore(), fetchImpl: async () => ok([{ name: "Toast", amount: "1", protein_g: 4 }]) });
+    h.els["food-input"].value = "toast";
+    h.els["log-btn"].click();
+    await settle();
+    const it = Object.values(days(h))[0][0];
+    check("calories default to 0", it.calories === 0, it);
+    check("calorie certainty empty", it.calorieCertainty === "", it);
+  }
+
+  // ---- 20. the calorie view swaps totals, units, certainty, sort and the goal
+  {
+    console.log("20. calorie view");
+    const h = makeHarness({
+      store: { ...baseStore(), "protein.sort": "protein" },
+      fetchImpl: async () => ok([
+        // Oil: a sure 0 g protein but a low-certainty calorie guess — the two
+        // certainties genuinely differ on the same item.
+        { name: "Oil", amount: "1 tbsp", protein_g: 0, certainty: "high", calories_kcal: 120, calorie_certainty: "low" },
+        { name: "Chicken", amount: "150 g", protein_g: 46, certainty: "high", calories_kcal: 250, calorie_certainty: "high" },
+      ]),
+    });
+    h.els["food-input"].value = "oil and chicken";
+    h.els["log-btn"].click();
+    await settle();
+
+    // Protein view (default): grams, "most protein", both rows sure, goal line drawn.
+    check("protein figure shown in grams", firstFigure(h) === "46 g", firstFigure(h));
+    check("sort labelled most protein", h.els["sort-toggle"].textContent === "most protein", h.els["sort-toggle"].textContent);
+    check("protein certainties", marks(h).join() === "cert-high,cert-high", marks(h));
+    check("goal line present", h.els["week"].children.some((c) => c.className === "goal-line"));
+    check("goal block shown", h.els["goal-area"].style.display !== "none", h.els["goal-area"].style.display);
+
+    // Switch to calories.
+    h.els["metric-calories"].click();
+    check("calorie figure shown in kcal", firstFigure(h) === "250 kcal", firstFigure(h));
+    check("total carries the kcal unit", /kcal/.test(h.els["total"].innerHTML), h.els["total"].innerHTML);
+    check("sort relabelled most calories", h.els["sort-toggle"].textContent === "most calories", h.els["sort-toggle"].textContent);
+    check("calorie certainties differ from protein", marks(h).join() === "cert-high,cert-low", marks(h));
+    check("no goal line in calorie view", !h.els["week"].children.some((c) => c.className === "goal-line"));
+    check("goal block hidden", h.els["goal-area"].style.display === "none", h.els["goal-area"].style.display);
+    check("choice persisted", h.store["protein.metric"] === "calories", h.store["protein.metric"]);
+
+    // And back: protein certainties return.
+    h.els["metric-protein"].click();
+    check("back to protein certainties", marks(h).join() === "cert-high,cert-high", marks(h));
+  }
+
+  // ---- 21. editing on one screen leaves the other figure untouched
+  {
+    console.log("21. per-metric edit isolation");
+    const h = makeHarness({
+      store: baseStore(),
+      fetchImpl: async () => ok([{ name: "Eggs", amount: "4", protein_g: 25, certainty: "high", calories_kcal: 360, calorie_certainty: "high" }]),
+    });
+    h.els["food-input"].value = "4 eggs";
+    h.els["log-btn"].click();
+    await settle();
+    const id = Object.values(days(h))[0][0].id;
+
+    // Edit calories: the editor is filled from the calorie figure, protein is left alone.
+    h.els["metric-calories"].click();
+    h.ctx.startEdit(id);
+    check("editor shows the calorie figure", fld(h, "edit-grams").value === 360, fld(h, "edit-grams").value);
+    fld(h, "edit-grams").value = "400";
+    ctl(h, "Save").click();
+    const a = Object.values(days(h))[0][0];
+    check("calories updated", a.calories === 400, a);
+    check("protein untouched by a calorie edit", a.protein === 25, a);
+    check("calorie certainty preserved", a.calorieCertainty === "high", a);
+
+    // Edit protein: calories survive.
+    h.els["metric-protein"].click();
+    h.ctx.startEdit(id);
+    check("editor shows the protein figure", fld(h, "edit-grams").value === 25, fld(h, "edit-grams").value);
+    fld(h, "edit-grams").value = "30";
+    ctl(h, "Save").click();
+    const b = Object.values(days(h))[0][0];
+    check("protein updated", b.protein === 30, b);
+    check("calories survive a protein edit", b.calories === 400, b);
+  }
+
+  // ---- 22. the calorie view mirrors into history, without a goal
+  {
+    console.log("22. calorie history");
+    const fmtD = (d) => d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
+    const seeded = {
+      [fmtD(new Date())]: [
+        { id: "a", name: "Eggs", amount: "4", protein: 25, calories: 360, calorieCertainty: "high" },
+        { id: "b", name: "Oil", amount: "1 tbsp", protein: 0, calories: 120, calorieCertainty: "low" },
+      ],
+    };
+    const h = makeHarness({
+      store: { ...baseStore(), "protein.goal": "40", "protein.metric": "calories", "protein.days": JSON.stringify(seeded) },
+      fetchImpl: async () => ok([]),
+    });
+    // Today's total on the main screen: calories summed, in kcal.
+    check("total sums calories", h.els["total"].innerHTML.replace(/<[^>]+>/g, "").trim() === "480 kcal", h.els["total"].innerHTML);
+
+    h.ctx.openHistory(fmtD(new Date()));
+    check("history sub states kcal, no goal", h.els["history-sub"].textContent === "480 kcal", h.els["history-sub"].textContent);
+    const items = h.els["history-body"].children.find((c) => c.className === "hist-items");
+    check("history item figures in kcal", items.children.map((li) => li.children[1].textContent).join() === "120 kcal,360 kcal", items.children.map((li) => li.children[1].textContent));
+  }
+
   console.log("\n" + pass + " passed, " + fail + " failed");
   process.exit(fail ? 1 : 0);
 })();

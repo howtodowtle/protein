@@ -585,8 +585,9 @@ const baseStore = () => ({ "protein.apiKey": "sk-test", "protein.provider": "ant
     check("empty-day message", h.els["history-body"].children[0].textContent === "Nothing logged this day.", h.els["history-body"].children[0].textContent);
   }
 
-  // The grams span of a rendered row (right column, first child), text and class.
-  const firstFigure = (h) => h.els["items"].children[0].children[1].children[0].textContent;
+  // The figure column of each rendered row (right side, first child), top to bottom
+  // — the same shape as shown/marks, so a row's number is read the way its name is.
+  const figures = (h) => h.els["items"].children.map((li) => li.children[1].children[0].textContent);
 
   // ---- 18. calories parse into their own fields, alongside protein
   {
@@ -634,7 +635,7 @@ const baseStore = () => ({ "protein.apiKey": "sk-test", "protein.provider": "ant
     await settle();
 
     // Protein view (default): grams, "most protein", both rows sure, goal line drawn.
-    check("protein figure shown in grams", firstFigure(h) === "46 g", firstFigure(h));
+    check("protein figure shown in grams", figures(h)[0] === "46 g", figures(h));
     check("sort labelled most protein", h.els["sort-toggle"].textContent === "most protein", h.els["sort-toggle"].textContent);
     check("protein certainties", marks(h).join() === "cert-high,cert-high", marks(h));
     check("goal line present", h.els["week"].children.some((c) => c.className === "goal-line"));
@@ -642,7 +643,7 @@ const baseStore = () => ({ "protein.apiKey": "sk-test", "protein.provider": "ant
 
     // Switch to calories.
     h.els["metric-calories"].click();
-    check("calorie figure shown in kcal", firstFigure(h) === "250 kcal", firstFigure(h));
+    check("calorie figure shown in kcal", figures(h)[0] === "250 kcal", figures(h));
     check("total carries the kcal unit", /kcal/.test(h.els["total"].innerHTML), h.els["total"].innerHTML);
     check("sort relabelled most calories", h.els["sort-toggle"].textContent === "most calories", h.els["sort-toggle"].textContent);
     check("calorie certainties differ from protein", marks(h).join() === "cert-high,cert-low", marks(h));
@@ -692,21 +693,24 @@ const baseStore = () => ({ "protein.apiKey": "sk-test", "protein.provider": "ant
   // ---- 22. the calorie view mirrors into history, without a goal
   {
     console.log("22. calorie history");
-    const fmtD = (d) => d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
-    const seeded = {
-      [fmtD(new Date())]: [
+    const h = makeHarness({
+      store: { ...baseStore(), "protein.goal": "40", "protein.metric": "calories" },
+      fetchImpl: async () => ok([]),
+    });
+    // Seed through the app's own key for today, then re-render — the same date the
+    // app would write, with no second copy of the date format to drift.
+    const today = h.ctx.todayKey();
+    h.store[h.ctx.KEY_DAYS] = JSON.stringify({
+      [today]: [
         { id: "a", name: "Eggs", amount: "4", protein: 25, calories: 360, calorieCertainty: "high" },
         { id: "b", name: "Oil", amount: "1 tbsp", protein: 0, calories: 120, calorieCertainty: "low" },
       ],
-    };
-    const h = makeHarness({
-      store: { ...baseStore(), "protein.goal": "40", "protein.metric": "calories", "protein.days": JSON.stringify(seeded) },
-      fetchImpl: async () => ok([]),
     });
+    h.ctx.render();
     // Today's total on the main screen: calories summed, in kcal.
     check("total sums calories", h.els["total"].innerHTML.replace(/<[^>]+>/g, "").trim() === "480 kcal", h.els["total"].innerHTML);
 
-    h.ctx.openHistory(fmtD(new Date()));
+    h.ctx.openHistory(today);
     check("history sub states kcal, no goal", h.els["history-sub"].textContent === "480 kcal", h.els["history-sub"].textContent);
     const items = h.els["history-body"].children.find((c) => c.className === "hist-items");
     check("history item figures in kcal", items.children.map((li) => li.children[1].textContent).join() === "120 kcal,360 kcal", items.children.map((li) => li.children[1].textContent));

@@ -697,7 +697,9 @@ function cycle(list, cur) { return list[(list.indexOf(cur) + 1) % list.length]; 
 // "recent" leads because the thing you just ate is the thing you are looking
 // at, and anything unrecognised falls back to it, so a stale or hand-edited
 // value degrades to the default.
-var SORT_LABELS = { recent: "newest first", protein: "most protein", certainty: "least sure" };
+// "protein" is the amount sort: it orders by whichever metric is on screen, so its
+// label is composed in render() as "most <metric>" and its entry here stays blank.
+var SORT_LABELS = { recent: "newest first", protein: "", certainty: "least sure" };
 var SORTS = Object.keys(SORT_LABELS);
 function loadSort() {
   var s = localStorage.getItem(KEY_SORT);
@@ -723,13 +725,13 @@ function certRank(v) { return CERTAINTY.indexOf(v) + 1; }
 // chart, history, the item editor) reads the active metric from here rather than
 // naming a field, so the calorie screen reuses the protein machinery whole. The lone
 // asymmetry is the goal: protein has one; calories, for now, is tracking-only.
-//   field   — the per-item number this metric sums and shows
-//   certKey — the per-item certainty word for that figure
-//   noun    — how the "most X" sort names it
-//   goal    — whether this metric has a target (and so a goal bar and goal line)
+//   field     — the per-item number this metric sums and shows
+//   certKey   — the per-item certainty word for that figure
+//   editLabel — the aria-label for that number's field in the item editor
+//   goal      — whether this metric has a target (and so a goal bar and goal line)
 var METRICS = {
-  protein:  { field: "protein",  unit: "g",    certKey: "certainty",        noun: "protein",  goal: true },
-  calories: { field: "calories", unit: "kcal", certKey: "calorieCertainty", noun: "calories", goal: false }
+  protein:  { field: "protein",  unit: "g",    certKey: "certainty",        editLabel: "Grams of protein", goal: true },
+  calories: { field: "calories", unit: "kcal", certKey: "calorieCertainty", editLabel: "Calories",         goal: false }
 };
 // Unknown or hand-edited value falls back to protein, the same way loadSort does.
 function loadMetric() {
@@ -1053,7 +1055,7 @@ function render() {
   var sort = loadSort();
   // The amount sort names the metric on screen ("most protein" / "most calories");
   // the other two modes read the same either way.
-  sortToggle.textContent = sort === "protein" ? "most " + m.noun : SORT_LABELS[sort];
+  sortToggle.textContent = sort === "protein" ? "most " + m.field : SORT_LABELS[sort];
   sortToggle.setAttribute("aria-label", "Sort: " + sortToggle.textContent + ". Tap to change.");
   sortItems(items, sort, m).forEach(function (it) {
     // A row being edited is moved, not rebuilt: a background render (a queued
@@ -1288,7 +1290,7 @@ function editRow(it) {
   var grams = editField("edit-grams", "number", it[m.field] || 0);
   grams.min = "0";
   grams.setAttribute("inputmode", "numeric");
-  grams.setAttribute("aria-label", m.field === "protein" ? "Grams of protein" : "Calories");
+  grams.setAttribute("aria-label", m.editLabel);
 
   // How sure the row is, next to the number it describes, cycling on tap like
   // the sort control above. An item the model made no claim about opens as

@@ -4,8 +4,17 @@
 // no need for Workbox. Strategy is network-first for every same-origin GET:
 // online you always run the newest index.html, offline you get the last copy
 // that loaded. API calls go to other origins and are never touched.
+//
+// "Offline", though, is not the only way a network fails to answer: a captive
+// portal or a connection that has dropped without saying so leaves the request
+// hanging until the OS gives up on it, and a plain network-first would hold the
+// app on a blank screen for all of it. So the network gets a few seconds to
+// beat the copy we already have and, past that, we open with the copy. It is
+// still network-first in every case where the network answers at all — the only
+// launch it changes is one that would otherwise have been a long stare.
 
 var CACHE = "protein-shell-v2";
+var NET_MS = 5000;  // how long a fresher copy is worth waiting for
 var SHELL = ["./", "./index.html", "./manifest.webmanifest", "./icon-192.png", "./icon-512.png", "./apple-touch-icon.png"];
 
 self.addEventListener("install", function (e) {
@@ -30,20 +39,32 @@ self.addEventListener("fetch", function (e) {
   if (req.method !== "GET") return;
   if (new URL(req.url).origin !== self.location.origin) return;
 
+  var net = fetch(req).then(function (res) {
+    if (res && res.ok) {
+      var copy = res.clone();
+      caches.open(CACHE).then(function (c) { c.put(req, copy); });
+    }
+    return res;
+  });
+  // The fetch runs to completion into the cache even when the race below stops
+  // waiting on it, so a slow launch still leaves the next one up to date.
+  e.waitUntil(net.catch(function () {}));
+
   e.respondWith(
-    fetch(req).then(function (res) {
-      if (res && res.ok) {
-        var copy = res.clone();
-        caches.open(CACHE).then(function (c) { c.put(req, copy); });
+    caches.match(req).then(function (hit) {
+      if (!hit) {
+        // Nothing to fall back to, so there is nothing to race: the network is
+        // the only answer, however long it takes.
+        return net.catch(function () {
+          // Deep link or a query string we never cached — fall back to the shell.
+          if (req.mode === "navigate") return caches.match("./index.html");
+          return Response.error();
+        });
       }
-      return res;
-    }).catch(function () {
-      return caches.match(req).then(function (hit) {
-        if (hit) return hit;
-        // Deep link or a query string we never cached — fall back to the shell.
-        if (req.mode === "navigate") return caches.match("./index.html");
-        return Response.error();
-      });
+      return Promise.race([
+        net.catch(function () { return hit; }),
+        new Promise(function (resolve) { setTimeout(function () { resolve(hit); }, NET_MS); })
+      ]);
     })
   );
 });

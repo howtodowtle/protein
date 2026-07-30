@@ -634,7 +634,6 @@ var KEY_PROVIDER = "protein.provider";
 var KEY_QUEUE = "protein.queue";
 var KEY_SORT = "protein.sort";
 var KEY_METRIC = "protein.metric";
-var MAX_ATTEMPTS = 3;
 var STORAGE_FAIL = "Saving failed — storage unavailable.";
 
 // Per-provider settings live under "protein.<field>.<provider>". One exception:
@@ -1488,11 +1487,18 @@ function retryPending(id) {
   drainNow();
 }
 
-function dropPending(id) {
+// The one place an entry leaves the queue for good, whether it was sent or
+// discarded. Drawing it again is the caller's business: the × below has nothing
+// else to redraw for, a send that just landed has a whole day to redraw.
+function removeEntry(id) {
   updateQueue(function (q) {
     return q.filter(function (e) { return e.id !== id; });
   });
-  delete cooling[id];  // the one place an entry leaves the queue for good
+  delete cooling[id];
+}
+
+function dropPending(id) {
+  removeEntry(id);
   render();
 }
 
@@ -1507,16 +1513,35 @@ function patchEntry(id, patch) {
   return ok;
 }
 
+// Opening the connection to the provider before there is anything to send. DNS,
+// TCP and TLS to a host this phone has not talked to since the app was last
+// closed cost the better part of a second, and every one of them would otherwise
+// land on the critical path of the first request. Re-inserting the tag is what
+// re-opens a connection that has since gone idle, so this is called at the
+// moments that say a request is coming — every drainNow, and reaching for the
+// box, which comes before there is anything to drain.
+var preconnectLink = null;
+function preconnect() {
+  if (preconnectLink) preconnectLink.remove();
+  preconnectLink = document.createElement("link");
+  preconnectLink.rel = "preconnect";
+  preconnectLink.href = "https://" + PROVIDERS[provider()].host;
+  preconnectLink.crossOrigin = "anonymous";  // the pool a CORS request draws from
+  document.head.appendChild(preconnectLink);
+}
+
 // Sending is oldest-first but not one-at-a-time, and one entry's trouble is
 // never another's wait: what you just typed goes out now, whatever else is
 // still in the queue and however slowly it is going. A few at a time is enough
 // for that — beyond it we would only be queueing at the provider instead.
 var MAX_INFLIGHT = 3;
-// What a failure worth repeating waits before it is tried again, by attempts
-// already made. The point is that it is tried at all without you: before this
-// the only triggers were things you did, so a rate limit at breakfast sat there
-// until you next opened the app.
-var RETRY_MS = [2000, 8000, 30000];
+// What a failure worth repeating waits before the next try, one step per retry.
+// The list is therefore also how many tries an entry gets: when the steps run
+// out it parks and waits for you. The point of retrying at all is that it
+// happens without you — before this the only triggers were things you did, so a
+// rate limit at breakfast sat there until you next opened the app.
+var RETRY_MS = [2000, 8000];
+var MAX_ATTEMPTS = RETRY_MS.length + 1;
 // A request that never reached the provider says nothing about the entry and
 // everything about the connection, so it holds the whole queue, not one entry.
 var HOLD_MS = 15000;
@@ -1526,47 +1551,41 @@ var cooling = {};   // entry id -> ms timestamp before which it is not worth ret
 var holdUntil = 0;  // ms timestamp: nothing goes out before this
 var retryTimer = null;
 
-// Everything that could go out this instant.
-function sendable(now) {
-  return loadQueue().filter(function (e) {
-    return !e.parked && !sending[e.id] && (cooling[e.id] || 0) <= now;
-  });
-}
+// When an entry could next go out: the later of its own cooldown and the hold
+// that applies to everything. Infinity is one this session has given up on (see
+// mark below). One answer, so a reason to wait added later cannot be taught to
+// the sending half and forgotten by the scheduling half.
+function readyAt(e) { return Math.max(cooling[e.id] || 0, holdUntil); }
 
-// Come back the moment the queue could move on its own. Recomputed from the
-// queue every time rather than added to, so there is only ever one timer and it
-// can only ever be the earliest one that matters.
-function scheduleRetry() {
-  var now = Date.now(), at = null;
-  loadQueue().forEach(function (e) {
-    if (e.parked || sending[e.id]) return;
-    // Whichever it is waiting for is the later of the two: its own cooldown, and
-    // the hold that applies to everything.
-    var t = Math.max(cooling[e.id] || 0, holdUntil);
-    // Infinity is an entry this session has given up on (see mark below).
-    if (t > now && t !== Infinity && (at == null || t < at)) at = t;
-  });
-  if (retryTimer) clearTimeout(retryTimer);
-  retryTimer = at == null ? null
-    : setTimeout(function () { retryTimer = null; drain(); }, at - now);
-}
-
-// Sends what it can, then arranges to be called again when it could send more.
+// One pass over the queue asking one question of each entry still waiting: can
+// it go now, and if not, when? Sends what it can, and sets a single timer for
+// the soonest of the rest, so the queue comes back to itself with nothing from
+// the user.
 function drain() {
   if (!apiKey()) return;
-  var now = Date.now();
-  if (now >= holdUntil) {
-    sendable(now)
-      .slice(0, Math.max(0, MAX_INFLIGHT - Object.keys(sending).length))
-      .forEach(function (e) { send(e); });
-  }
-  scheduleRetry();
+  var now = Date.now(), free = MAX_INFLIGHT - Object.keys(sending).length, next = null;
+
+  loadQueue().forEach(function (e) {
+    if (e.parked || sending[e.id]) return;
+    var at = readyAt(e);
+    // Ready but with nothing free needs no timer of its own: the send that
+    // frees the slot drains again on its way out.
+    if (at <= now) { if (free > 0) { free--; send(e); } }
+    else if (at !== Infinity && (next == null || at < next)) next = at;
+  });
+
+  if (retryTimer) clearTimeout(retryTimer);
+  retryTimer = next == null ? null
+    : setTimeout(function () { retryTimer = null; drain(); }, next - now);
 }
 
 // You are here now, so nothing waits: a cooldown and a hold are both guesses
 // about when to try next, and an actual trigger — a submit, a reconnect, the app
-// coming back to the front — beats either.
+// coming back to the front — beats either. Every one of those is also a moment
+// worth opening the connection for, which is why the warming lives here rather
+// than at each of the callers.
 function drainNow() {
+  preconnect();
   cooling = {};
   holdUntil = 0;
   drain();
@@ -1599,6 +1618,9 @@ async function send(e) {
   try {
     await attempt(e);
   } finally {
+    // The one redraw for whatever the attempt settled on — the day it wrote, or
+    // the error it recorded. It comes after the flag, since before that the row
+    // would only draw as "estimating…" again.
     delete sending[e.id];
     render();
     drain();  // a slot just came free
@@ -1622,7 +1644,7 @@ async function attempt(e) {
     days[e.date] = fileItems(days[e.date] || [], parsed, e.createdAt || "");
     // Leave it queued rather than dropping a parse we already paid for.
     if (!saveDays(days)) return mark(e.id, { error: STORAGE_FAIL, parked: true });
-    return dropPending(e.id);
+    return removeEntry(e.id);
   }
 
   var msg = failure.message || "Couldn't parse that — try rephrasing.";
@@ -1636,12 +1658,16 @@ async function attempt(e) {
 
   var attempts = (e.attempts || 0) + 1;
   var parked = failure.retry === "terminal" || attempts >= MAX_ATTEMPTS;
+  // Unparked means a try is left, and the list holds a step for each of those.
   mark(e.id, { attempts: attempts, error: msg, parked: parked },
-    parked ? 0 : Date.now() + RETRY_MS[Math.min(attempts, RETRY_MS.length) - 1]);
+    parked ? 0 : Date.now() + RETRY_MS[attempts - 1]);
 }
 
 // ---------- wiring ----------
 logBtn.addEventListener("click", log);
+// Reaching for the box is the one moment a request is coming that no drain
+// knows about yet.
+foodInput.addEventListener("focus", preconnect);
 foodInput.addEventListener("keydown", function (e) {
   if (e.key === "Enter" && !e.shiftKey) {
     e.preventDefault();
@@ -1717,7 +1743,6 @@ function saveSettings() {
   settingsEl.classList.remove("open");
   showError("");
   foodInput.focus();
-  preconnect();
   drainNow();  // a fresh key or model may be exactly what the queue was waiting for
 }
 
@@ -1764,30 +1789,11 @@ document.addEventListener("keydown", function (e) {
   if (e.key === "Escape" && historyView != null) closeHistory();
 });
 
-// Opening the connection to the provider before there is anything to send. DNS,
-// TCP and TLS to a host this phone has not talked to since the app was last
-// closed cost the better part of a second, and every one of them would otherwise
-// land on the critical path of the first request. Re-inserting the tag is what
-// re-opens a connection that has since gone idle, so the moments worth paying
-// for it are the ones that say a request is coming: opening the app, changing
-// provider, and reaching for the box.
-var preconnectLink = null;
-function preconnect() {
-  if (preconnectLink) preconnectLink.remove();
-  preconnectLink = document.createElement("link");
-  preconnectLink.rel = "preconnect";
-  preconnectLink.href = "https://" + PROVIDERS[provider()].host;
-  preconnectLink.crossOrigin = "anonymous";  // the pool a CORS request draws from
-  document.head.appendChild(preconnectLink);
-}
-foodInput.addEventListener("focus", preconnect);
-
 // first run: no key -> open settings
 providerSelect.value = provider();
 syncSettings();
 if (!apiKey()) settingsEl.classList.add("open");
 render();
-preconnect();
 drainNow();
 
 // Send triggers. iOS Safari has no Background Sync, so a queued entry can only
@@ -1796,7 +1802,7 @@ drainNow();
 // so a transient failure no longer waits for you to come back.
 document.addEventListener("visibilitychange", function () {
   // also re-renders at midnight rollover
-  if (!document.hidden) { render(); preconnect(); drainNow(); }
+  if (!document.hidden) { render(); drainNow(); }
 });
 window.addEventListener("online", function () { render(); drainNow(); });
 // navigator.onLine only ever tells the truth when false (a captive portal still

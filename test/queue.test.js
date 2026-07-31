@@ -22,7 +22,14 @@ function makeEl(id) {
     },
     listeners: {},
     addEventListener(t, f) { (this.listeners[t] ||= []).push(f); },
-    appendChild(c) { this.children.push(c); return c; },
+    appendChild(c) { c.parent = this; this.children.push(c); return c; },
+    // The preconnect tag is removed and re-added to re-open an idle connection,
+    // so a shim that never detached anything would let it pile up.
+    remove() {
+      const i = this.parent ? this.parent.children.indexOf(this) : -1;
+      if (i >= 0) this.parent.children.splice(i, 1);
+      this.parent = null;
+    },
     setAttribute() {}, select() {},
     selectionStart: null,
     setSelectionRange(start) { this.selectionStart = start; },
@@ -52,6 +59,7 @@ function makeHarness({ fetchImpl, online = true, store = {} }) {
   const document = {
     getElementById: (id) => (els[id] ||= makeEl(id)),
     createElement: (tag) => makeEl("<" + tag + ">"),
+    head: makeEl("head"),
     addEventListener(t, f) { (this.listeners[t] ||= []).push(f); },
     listeners: {},
     hidden: false,
@@ -74,7 +82,10 @@ function makeHarness({ fetchImpl, online = true, store = {} }) {
     crypto: { randomUUID: () => "id-" + (sandbox.__n = (sandbox.__n || 0) + 1) },
     fetch: fetchImpl,
     console,
-    setTimeout, clearTimeout,
+    // The retry timer is a real one, and a pending 15s hold would otherwise keep
+    // the test process alive that much longer after the last check has run.
+    setTimeout: (fn, ms) => { const t = setTimeout(fn, ms); if (t.unref) t.unref(); return t; },
+    clearTimeout,
     JSON, Math, Date, Object, Array, String, Number, Error, Promise, URL,
   };
   sandbox.self = sandbox;
@@ -97,7 +108,9 @@ const httpErr = (status, msg) => ({
 });
 const netFail = () => { throw new TypeError("Failed to fetch"); };
 
-const settle = () => new Promise((r) => setTimeout(r, 30));
+// Long enough for the app's own promises to run out. A test waiting on one of
+// its timers passes the wait it needs.
+const settle = (ms = 30) => new Promise((r) => setTimeout(r, ms));
 // Read through the app's own key constants: a rename in index.html must break
 // these loudly, not silently make them read an absent key and pass.
 const q = (h) => JSON.parse(h.store[h.ctx.KEY_QUEUE] || "[]");
@@ -714,6 +727,100 @@ const baseStore = () => ({ "protein.apiKey": "sk-test", "protein.provider": "ant
     check("history sub states kcal, no goal", h.els["history-sub"].textContent === "480 kcal", h.els["history-sub"].textContent);
     const items = h.els["history-body"].children.find((c) => c.className === "hist-items");
     check("history item figures in kcal", items.children.map((li) => li.children[1].textContent).join() === "120 kcal,360 kcal", items.children.map((li) => li.children[1].textContent));
+  }
+
+  // ---- 23. a struggling entry no longer holds up the one behind it
+  {
+    console.log("23. head-of-line");
+    const h = makeHarness({
+      store: baseStore(),
+      fetchImpl: async (url, init) => {
+        const sent = JSON.parse(init.body).messages[0].content;
+        return /stuck/.test(sent)
+          ? httpErr(429, "rate limit")
+          : ok([{ name: "Toast", amount: "1 slice", protein_g: 4 }]);
+      },
+    });
+    h.ctx.MAX_INFLIGHT = 1;  // strictly one at a time: the shape the bug lived in
+    h.els["food-input"].value = "stuck";
+    h.els["log-btn"].click();
+    await settle();
+    h.els["food-input"].value = "toast";
+    h.els["log-btn"].click();
+    await settle();
+    check("entry behind it landed anyway", Object.values(days(h))[0][0].protein === 4, days(h));
+    check("the failing one is still queued", q(h).length === 1 && /rate limit/.test(q(h)[0].error), q(h));
+  }
+
+  // ---- 24. a retryable failure retries itself, with nothing from the user
+  {
+    console.log("24. automatic retry");
+    let calls = 0, good = false;
+    const h = makeHarness({
+      store: baseStore(),
+      fetchImpl: async () => { calls++; return good ? ok([{ name: "Quark", amount: "200 g", protein_g: 19 }]) : httpErr(503, "overloaded"); },
+    });
+    // Long enough to still be waiting at the first check, short enough not to
+    // slow the suite. How long it really waits is the app's business.
+    h.ctx.RETRY_MS[0] = 60;
+    h.els["food-input"].value = "200g quark";
+    h.els["log-btn"].click();
+    await settle();
+    check("first attempt failed", calls === 1 && q(h)[0].attempts === 1, [calls, q(h)[0]]);
+
+    good = true;
+    // No click, no reopen, no reconnect — only the app's own timer.
+    await settle(150);
+    check("retried on its own", calls === 2, calls);
+    check("landed without a trigger", Object.values(days(h))[0][0].protein === 19, days(h));
+  }
+
+  // ---- 25. a fresh entry does not wait for one already in flight, and the day
+  //          still reads in the order things were logged
+  {
+    console.log("25. fresh entry overtakes an in-flight one");
+    let release;
+    const gate = new Promise((r) => (release = r));
+    let started = 0;
+    const h = makeHarness({
+      store: baseStore(),
+      fetchImpl: async (url, init) => {
+        started++;
+        const slow = /slow/.test(JSON.parse(init.body).messages[0].content);
+        if (slow) await gate;
+        return ok([{ name: slow ? "Slow" : "Fast", amount: "", protein_g: 1 }]);
+      },
+    });
+    h.els["food-input"].value = "slow";
+    h.els["log-btn"].click();
+    await settle();
+    h.els["food-input"].value = "fast";
+    h.els["log-btn"].click();
+    await settle();
+    check("both are in flight at once", started === 2, started);
+    check("the fresh one has already landed", Object.values(days(h))[0].length === 1, days(h));
+
+    release();
+    await settle();
+    check("both landed", q(h).length === 0 && Object.values(days(h))[0].length === 2, days(h));
+    // Answers came back last-first; the day is filed first-first regardless.
+    check("day reads in log order", Object.values(days(h))[0].map((i) => i.name).join() === "Slow,Fast", days(h));
+    check("list shows newest first", shown(h).join() === "Fast,Slow", shown(h));
+  }
+
+  // ---- 26. a request that times out is the entry's problem, not the network's
+  {
+    console.log("26. request timeout");
+    const h = makeHarness({
+      store: baseStore(),
+      fetchImpl: async () => { const e = new Error("aborted"); e.name = "TimeoutError"; throw e; },
+    });
+    h.els["food-input"].value = "4 eggs";
+    h.els["log-btn"].click();
+    await settle();
+    check("attempt burned", q(h)[0].attempts === 1, q(h)[0]);
+    check("not treated as offline", !/network error/.test(q(h)[0].error), q(h)[0].error);
+    check("message states the wait", /after 60s/.test(q(h)[0].error), q(h)[0].error);
   }
 
   console.log("\n" + pass + " passed, " + fail + " failed");

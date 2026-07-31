@@ -108,7 +108,9 @@ const httpErr = (status, msg) => ({
 });
 const netFail = () => { throw new TypeError("Failed to fetch"); };
 
-const settle = () => new Promise((r) => setTimeout(r, 30));
+// Long enough for the app's own promises to run out. A test waiting on one of
+// its timers passes the wait it needs.
+const settle = (ms = 30) => new Promise((r) => setTimeout(r, ms));
 // Read through the app's own key constants: a rename in index.html must break
 // these loudly, not silently make them read an absent key and pass.
 const q = (h) => JSON.parse(h.store[h.ctx.KEY_QUEUE] || "[]");
@@ -768,7 +770,7 @@ const baseStore = () => ({ "protein.apiKey": "sk-test", "protein.provider": "ant
 
     good = true;
     // No click, no reopen, no reconnect — only the app's own timer.
-    await new Promise((r) => setTimeout(r, 150));
+    await settle(150);
     check("retried on its own", calls === 2, calls);
     check("landed without a trigger", Object.values(days(h))[0][0].protein === 19, days(h));
   }

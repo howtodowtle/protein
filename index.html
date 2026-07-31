@@ -1520,8 +1520,15 @@ function patchEntry(id, patch) {
 // re-opens a connection that has since gone idle, so this is called at the
 // moments that say a request is coming — every drainNow, and reaching for the
 // box, which comes before there is anything to drain.
-var preconnectLink = null;
+var preconnectLink = null, preconnectedAt = 0;
 function preconnect() {
+  // Without a key there is nothing to open a connection for. And since it is the
+  // re-inserting that re-opens an idle one, doing it twice in the same breath —
+  // focusing the box on the way to a submit — would only open a second one: a
+  // connection a second old is not idle. Guarded here rather than at the callers,
+  // so that calling this whenever a request looks likely is always the right move.
+  if (!apiKey() || Date.now() - preconnectedAt < 1000) return;
+  preconnectedAt = Date.now();
   if (preconnectLink) preconnectLink.remove();
   preconnectLink = document.createElement("link");
   preconnectLink.rel = "preconnect";
@@ -1563,16 +1570,23 @@ function readyAt(e) { return Math.max(cooling[e.id] || 0, holdUntil); }
 // the user.
 function drain() {
   if (!apiKey()) return;
-  var now = Date.now(), free = MAX_INFLIGHT - Object.keys(sending).length, next = null;
+  var now = Date.now(), free = MAX_INFLIGHT - Object.keys(sending).length;
+  var going = [], next = null;
 
   loadQueue().forEach(function (e) {
     if (e.parked || sending[e.id]) return;
     var at = readyAt(e);
     // Ready but with nothing free needs no timer of its own: the send that
     // frees the slot drains again on its way out.
-    if (at <= now) { if (free > 0) { free--; send(e); } }
+    if (at <= now) { if (going.length < free) going.push(e); }
     else if (at !== Infinity && (next == null || at < next)) next = at;
   });
+
+  // Marked together and drawn once: three entries starting at the same moment
+  // are one change to the screen, not three.
+  going.forEach(function (e) { sending[e.id] = true; });
+  if (going.length) render();
+  going.forEach(function (e) { send(e); });
 
   if (retryTimer) clearTimeout(retryTimer);
   retryTimer = next == null ? null
@@ -1612,55 +1626,52 @@ function fileItems(list, items, at) {
   return i < 0 ? list.concat(items) : list.slice(0, i).concat(items, list.slice(i));
 }
 
+// One try at one entry, from the request to what became of it. The caller has
+// already marked it as sending and drawn that; every way out of here runs the
+// finally, which draws whatever it settled on.
 async function send(e) {
-  sending[e.id] = true;
-  render();
   try {
-    await attempt(e);
+    var parsed = null, failure = null;
+    try {
+      parsed = await parseFood(e.text);
+    } catch (err) {
+      failure = err;
+    }
+
+    // The entry may have been discarded while the request was in flight.
+    if (!loadQueue().some(function (x) { return x.id === e.id; })) return;
+
+    if (!failure) {
+      if (!parsed.length) return mark(e.id, { error: "No food recognized — edit and retry.", parked: true });
+      var days = loadDays();
+      days[e.date] = fileItems(days[e.date] || [], parsed, e.createdAt || "");
+      // Leave it queued rather than dropping a parse we already paid for.
+      if (!saveDays(days)) return mark(e.id, { error: STORAGE_FAIL, parked: true });
+      return removeEntry(e.id);
+    }
+
+    var msg = failure.message || "Couldn't parse that — try rephrasing.";
+
+    // "defer": the request never reached the provider, so it is not the entry's
+    // fault and costs no attempt. Nothing else will get through either.
+    if (failure.retry === "defer") {
+      holdUntil = Date.now() + HOLD_MS;
+      return mark(e.id, { error: msg });
+    }
+
+    var attempts = (e.attempts || 0) + 1;
+    var parked = failure.retry === "terminal" || attempts >= MAX_ATTEMPTS;
+    // Unparked means a try is left, and the list holds a step for each of those.
+    mark(e.id, { attempts: attempts, error: msg, parked: parked },
+      parked ? 0 : Date.now() + RETRY_MS[attempts - 1]);
   } finally {
-    // The one redraw for whatever the attempt settled on — the day it wrote, or
-    // the error it recorded. It comes after the flag, since before that the row
+    // The one redraw for whatever this settled on — the day it wrote, or the
+    // error it recorded. It comes after the flag, since before that the row
     // would only draw as "estimating…" again.
     delete sending[e.id];
     render();
     drain();  // a slot just came free
   }
-}
-
-async function attempt(e) {
-  var parsed = null, failure = null;
-  try {
-    parsed = await parseFood(e.text);
-  } catch (err) {
-    failure = err;
-  }
-
-  // The entry may have been discarded while the request was in flight.
-  if (!loadQueue().some(function (x) { return x.id === e.id; })) return;
-
-  if (!failure) {
-    if (!parsed.length) return mark(e.id, { error: "No food recognized — edit and retry.", parked: true });
-    var days = loadDays();
-    days[e.date] = fileItems(days[e.date] || [], parsed, e.createdAt || "");
-    // Leave it queued rather than dropping a parse we already paid for.
-    if (!saveDays(days)) return mark(e.id, { error: STORAGE_FAIL, parked: true });
-    return removeEntry(e.id);
-  }
-
-  var msg = failure.message || "Couldn't parse that — try rephrasing.";
-
-  // "defer": the request never reached the provider, so it is not the entry's
-  // fault and costs no attempt. Nothing else will get through either.
-  if (failure.retry === "defer") {
-    holdUntil = Date.now() + HOLD_MS;
-    return mark(e.id, { error: msg });
-  }
-
-  var attempts = (e.attempts || 0) + 1;
-  var parked = failure.retry === "terminal" || attempts >= MAX_ATTEMPTS;
-  // Unparked means a try is left, and the list holds a step for each of those.
-  mark(e.id, { attempts: attempts, error: msg, parked: parked },
-    parked ? 0 : Date.now() + RETRY_MS[attempts - 1]);
 }
 
 // ---------- wiring ----------

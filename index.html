@@ -404,7 +404,8 @@
       <button id="api-key-save" class="btn-solid" type="button">Save</button>
     </div>
     <p id="settings-note"></p>
-    <p id="build-stamp"></p>
+    <!-- The deploy rewrites this line (.github/workflows/stamp.yml); "dev" means it never went through one. -->
+    <p id="build-stamp">dev</p>
   </section>
 
   <section class="total-section">
@@ -486,12 +487,6 @@
 
 <script>
 "use strict";
-
-// Deploys rewrite the constant below with "Build <sha> · <date>" and commit it
-// back (.github/workflows/stamp.yml), so it names the deploy this copy of the
-// file came from; "dev" means no deploy has ever stamped it. Shown at the
-// bottom of the settings panel.
-var BUILD_STAMP = "dev";
 
 // ---------- providers ----------
 // Each provider maps the same request/response contract onto its own wire format.
@@ -1806,8 +1801,6 @@ $("history-back").addEventListener("click", function () { openHistory("list"); }
 document.addEventListener("keydown", function (e) {
   if (e.key === "Escape" && historyView != null) closeHistory();
 });
-
-$("build-stamp").textContent = BUILD_STAMP;
 
 // first run: no key -> open settings
 providerSelect.value = provider();

@@ -1,0 +1,38 @@
+# GitHub Pages serves index.html straight off main — there is no build step —
+# so this is the one place a deploy can bake anything in: after each push,
+# rewrite the build-stamp line with the pushed commit's short SHA and commit
+# date and push the result back for Pages to publish. Pushes made with the
+# default GITHUB_TOKEN never retrigger workflows, so this cannot loop.
+name: Stamp build
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+# Back-to-back pushes collapse into one run stamping the newest commit, rather
+# than racing each other's push and failing red for a benign reason.
+concurrency:
+  group: stamp-main
+  cancel-in-progress: true
+
+jobs:
+  stamp:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Bake commit SHA and date into index.html
+        run: |
+          sha=$(git rev-parse --short=7 HEAD)
+          date=$(TZ=Europe/Berlin git log -1 --format=%cd --date=format-local:%Y-%m-%d)
+          stamp="Build $sha · $date"
+          sed -i "s|\(id=\"build-stamp\">\)[^<]*|\1$stamp|" index.html
+          # Fail the run loudly if the anchor ever stops matching — a silently
+          # unstamped page would claim its last stamp forever.
+          grep -qF "id=\"build-stamp\">$stamp<" index.html
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "Stamp build $sha"
+          git push

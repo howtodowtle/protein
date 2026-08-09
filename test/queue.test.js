@@ -113,21 +113,29 @@ const httpErr = (status, msg) => ({
 const netFail = () => { throw new TypeError("Failed to fetch"); };
 
 // SSE machinery. A streamed response's body hands out frames one microtask at
-// a time, the way a provider drips them; a "WAIT" frame parks the stream on
-// `gate` so mid-stream state can be asserted before the test releases it.
+// a time, the way a provider drips them. A frame can also be a behavior — a
+// function returning a promise — so a stream can park on a gate mid-answer,
+// or die the way an aborted read does.
 const enc = new TextEncoder();
-const sse = (frames, gate) => ({
+const sse = (frames) => ({
   ok: true, status: 200,
   body: { getReader: () => ({ i: 0, async read() {
     await Promise.resolve();
     if (this.i >= frames.length) return { done: true };
     const f = frames[this.i++];
-    if (f === "WAIT") { await gate; return this.read(); }
+    if (typeof f === "function") { await f(); return this.read(); }
     return { done: false, value: enc.encode(f) };
   } }) },
   // Streaming reads the body as a stream; reaching for text() means the app
   // took the wrong path.
   text: async () => { throw new Error("text() on a streamed response"); },
+});
+// A read or request that never delivers: pending until the app cuts it off,
+// then failing the way an aborted fetch does.
+const abortsWith = (signal) => new Promise((_, reject) => {
+  signal.addEventListener("abort", () => {
+    const e = new Error("aborted"); e.name = "AbortError"; reject(e);
+  });
 });
 // One provider chunk carrying `text`, framed as the SSE line it arrives on —
 // one builder per wire format the app claims to speak.
@@ -842,14 +850,15 @@ const baseStore = () => ({ "protein.apiKey": "sk-test", "protein.provider": "ant
     console.log("26. request timeout");
     const h = makeHarness({
       store: baseStore(),
-      fetchImpl: async () => { const e = new Error("aborted"); e.name = "TimeoutError"; throw e; },
+      fetchImpl: (url, init) => abortsWith(init.signal),
     });
+    h.ctx.REQUEST_MS = 50;
     h.els["food-input"].value = "4 eggs";
     h.els["log-btn"].click();
-    await settle();
+    await settle(120);
     check("attempt burned", q(h)[0].attempts === 1, q(h)[0]);
     check("not treated as offline", !/network error/.test(q(h)[0].error), q(h)[0].error);
-    check("message states the wait", /after 60s/.test(q(h)[0].error), q(h)[0].error);
+    check("message states the wait", /No answer from .* after 0s/.test(q(h)[0].error), q(h)[0].error);
   }
 
   // ---- 27. a streamed answer previews each item as it completes, and commits
@@ -865,9 +874,9 @@ const baseStore = () => ({ "protein.apiKey": "sk-test", "protein.provider": "ant
         return sse([
           aDelta('[{"name":"Fried eggs","amount":"4 eggs, ~220 g","protein_g":25,"certainty":"high",'),
           aDelta('"calories_kcal":360,"calorie_certainty":"high"},'),
-          "WAIT",
+          () => gate,
           aDelta('{"name":"Bauernbrot","amount":"3 slices, ~135 g","protein_g":10,"certainty":"medium","calories_kcal":340,"calorie_certainty":"medium"}]'),
-        ], gate);
+        ]);
       },
     });
     h.els["food-input"].value = "4 fried eggs and 3 slices of bauernbrot";
@@ -901,20 +910,8 @@ const baseStore = () => ({ "protein.apiKey": "sk-test", "protein.provider": "ant
       fetchImpl: async (url, init) => {
         calls++;
         if (calls > 1) return ok([{ name: "Eggs", amount: "4", protein_g: 25 }]);
-        let first = true;
-        return {
-          ok: true, status: 200,
-          body: { getReader: () => ({ read: () => {
-            if (first) { first = false; return Promise.resolve({ done: false, value: enc.encode(aDelta("[")) }); }
-            // Silence: never resolves, rejects only when the app cuts it off.
-            return new Promise((resolve, reject) => {
-              init.signal.addEventListener("abort", () => {
-                const e = new Error("aborted"); e.name = "AbortError"; reject(e);
-              });
-            });
-          } }) },
-          text: async () => { throw new Error("text() on a streamed response"); },
-        };
+        // One byte arrives, then silence until the app cuts the read off.
+        return sse([aDelta("["), () => abortsWith(init.signal)]);
       },
     });
     h.ctx.STALL_MS = 40;
@@ -930,29 +927,9 @@ const baseStore = () => ({ "protein.apiKey": "sk-test", "protein.provider": "ant
     check("item written", Object.values(days(h))[0][0].protein === 25, days(h));
   }
 
-  // ---- 29. the first-byte wait is a real abort now, and still reads as a timeout
+  // ---- 29. a browser that cannot read streams never asks for one
   {
-    console.log("29. first-byte timeout");
-    const h = makeHarness({
-      store: baseStore(),
-      fetchImpl: (url, init) => new Promise((resolve, reject) => {
-        init.signal.addEventListener("abort", () => {
-          const e = new Error("aborted"); e.name = "AbortError"; reject(e);
-        });
-      }),
-    });
-    h.ctx.REQUEST_MS = 50;
-    h.els["food-input"].value = "4 eggs";
-    h.els["log-btn"].click();
-    await settle(120);
-    check("attempt burned", q(h)[0].attempts === 1, q(h)[0]);
-    check("read as no answer", /No answer/.test(q(h)[0].error), q(h)[0].error);
-    check("not treated as offline", !/network error/.test(q(h)[0].error), q(h)[0].error);
-  }
-
-  // ---- 30. a browser that cannot read streams never asks for one
-  {
-    console.log("30. stream-incapable browser");
+    console.log("29. stream-incapable browser");
     let sentBody = null;
     const h = makeHarness({
       streamCapable: false,
@@ -968,9 +945,9 @@ const baseStore = () => ({ "protein.apiKey": "sk-test", "protein.provider": "ant
     // response above exercises: tests 1-26 all run with streamCapable on.
   }
 
-  // ---- 31. gemini streams through its own endpoint and chunk shape
+  // ---- 30. gemini streams through its own endpoint and chunk shape
   {
-    console.log("31. gemini streaming");
+    console.log("30. gemini streaming");
     let sentUrl = "";
     const h = makeHarness({
       store: { "protein.provider": "gemini", "protein.apiKey.gemini": "AIza-test" },
@@ -989,9 +966,9 @@ const baseStore = () => ({ "protein.apiKey": "sk-test", "protein.provider": "ant
     check("both items landed", Object.values(days(h))[0].length === 2, days(h));
   }
 
-  // ---- 32. openai-compatible chunks: null reasoning deltas and [DONE] pass through
+  // ---- 31. openai-compatible chunks: null reasoning deltas and [DONE] pass through
   {
-    console.log("32. deepseek streaming");
+    console.log("31. deepseek streaming");
     const h = makeHarness({
       store: { "protein.provider": "deepseek", "protein.apiKey.deepseek": "sk-ds" },
       fetchImpl: async () => sse([
@@ -1007,18 +984,18 @@ const baseStore = () => ({ "protein.apiKey": "sk-test", "protein.provider": "ant
     check("queue drained", q(h).length === 0, q(h));
   }
 
-  // ---- 33. discarding an entry mid-stream leaves nothing behind
+  // ---- 32. discarding an entry mid-stream leaves nothing behind
   {
-    console.log("33. discard mid-stream");
+    console.log("32. discard mid-stream");
     let release;
     const gate = new Promise((r) => (release = r));
     const h = makeHarness({
       store: baseStore(),
       fetchImpl: async () => sse([
         aDelta('[{"name":"W","amount":"","protein_g":9,"certainty":"high","calories_kcal":50,"calorie_certainty":"high"},'),
-        "WAIT",
+        () => gate,
         aDelta('{"name":"X","amount":"","protein_g":3,"certainty":"high","calories_kcal":20,"calorie_certainty":"high"}]'),
-      ], gate),
+      ]),
     });
     h.els["food-input"].value = "in flight";
     h.els["log-btn"].click();

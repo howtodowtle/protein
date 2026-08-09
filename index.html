@@ -501,13 +501,14 @@ var THINKING_BUDGET = 4000; // room for reasoning tokens when thinking is on
 // The messages-shaped body Anthropic and the OpenAI-compatible providers agree on.
 // Only the "thinking on" type string and where effort lands actually differ, so
 // those get layered on by the caller.
-function chatBody(model, prompt, opts) {
+function chatBody(model, prompt, opts, stream) {
   var body = {
     model: model,
     max_tokens: opts.thinking === "on" ? THINKING_BUDGET : 500,
     messages: [{ role: "user", content: prompt }]
   };
   if (opts.thinking === "off") body.thinking = { type: "disabled" };
+  if (stream) body.stream = true;
   return body;
 }
 
@@ -521,12 +522,11 @@ var PROVIDERS = {
     efforts: ["low", "medium", "high", "xhigh", "max"],
     effortNote: "output_config.effort — Claude 4.6+ only (xhigh: 4.7+). Haiku 4.5 has no effort setting.",
     request: function (key, model, prompt, opts, stream) {
-      var body = chatBody(model, prompt, opts);
+      var body = chatBody(model, prompt, opts, stream);
       // Adaptive thinking is the current form on Claude 4.6+; older models
       // (incl. the default Haiku 4.5) will reject it — the error is shown as-is.
       if (opts.thinking === "on") body.thinking = { type: "adaptive" };
       if (opts.effort) body.output_config = { effort: opts.effort };
-      if (stream) body.stream = true;
       return {
         url: "https://api.anthropic.com/v1/messages",
         headers: {
@@ -612,28 +612,19 @@ var PROVIDERS = {
         }
       };
     },
-    extract: function (data) {
-      var cand = (data.candidates || [])[0];
-      var parts = (cand && cand.content && cand.content.parts) || [];
-      return parts.map(function (p) { return p.text || ""; }).join("\n");
-    },
+    extract: function (data) { return geminiText(data, "\n"); },
     // A streamed chunk is shaped like a whole generateContent response, just
     // holding less of it. Gemini sends no thinking deltas — with thinking on
     // it is simply silent until the answer itself starts.
-    delta: function (c) {
-      var cand = (c.candidates || [])[0];
-      var parts = (cand && cand.content && cand.content.parts) || [];
-      return parts.map(function (p) { return p.text || ""; }).join("");
-    }
+    delta: function (c) { return geminiText(c, ""); }
   }
 };
 
 // OpenAI-compatible chat/completions shape, shared by DeepSeek and Kimi.
 function openaiRequest(url, key, model, prompt, opts, stream) {
-  var body = chatBody(model, prompt, opts);
+  var body = chatBody(model, prompt, opts, stream);
   if (opts.thinking === "on") body.thinking = { type: "enabled" };
   if (opts.effort) body.reasoning_effort = opts.effort;
-  if (stream) body.stream = true;
   return {
     url: url,
     headers: {
@@ -653,6 +644,14 @@ function openaiDelta(data) {
   var choice = (data.choices || [])[0];
   return (choice && choice.delta && typeof choice.delta.content === "string")
     ? choice.delta.content : "";
+}
+// Both halves of Gemini's reading share one walk. A whole answer joins its
+// parts the way extract() always has; a streamed chunk joins them bare, since
+// its parts are fragments of one text, not blocks.
+function geminiText(data, sep) {
+  var cand = (data.candidates || [])[0];
+  var parts = (cand && cand.content && cand.content.parts) || [];
+  return parts.map(function (p) { return p.text || ""; }).join(sep);
 }
 
 var PROVIDER_IDS = Object.keys(PROVIDERS);
@@ -927,11 +926,11 @@ var STALL_MS = 25000;
 // Finds the completed top-level objects of the JSON array while it is still
 // arriving. Display only: the full text is re-parsed once the stream ends, so
 // this can afford to be tolerant — on garbage (fences, prose, half a token) it
-// emits nothing, and it never throws. `from` is how far a previous call got, so
-// an object is surfaced exactly once however the chunks split it.
-function scanObjects(text, from) {
-  var out = [], depth = 0, inStr = false, esc = false, start = -1;
-  for (var i = from; i < text.length; i++) {
+// emits nothing, and it never throws. Rescanning the whole text every call is
+// nothing at the size of one answer, and keeps this a pure function of it.
+function scanObjects(text) {
+  var out = [], depth = 0, inStr = false, esc = false, start = 0;
+  for (var i = 0; i < text.length; i++) {
     var c = text.charAt(i);
     if (inStr) {
       if (esc) esc = false;
@@ -940,30 +939,29 @@ function scanObjects(text, from) {
     }
     else if (c === '"') inStr = true;
     else if (c === "{") { if (depth === 0) start = i; depth++; }
-    else if (c === "}" && depth > 0 && --depth === 0 && start >= 0) {
+    else if (c === "}" && depth > 0 && --depth === 0) {
       try { out.push(JSON.parse(text.slice(start, i + 1))); } catch (e) {}
-      from = i + 1; start = -1;
     }
   }
-  return { objects: out, offset: from };
+  return out;
 }
 
 // Reads an SSE response to its end and returns the text the model produced.
 // All three providers frame streaming the same way — "data: {json}" lines,
 // blank-line separated — and differ only in where the text sits inside a
-// chunk, which is each one's delta(). Every arrival pushes the stall deadline
-// back, whether or not it carried visible text: reasoning deltas and
-// keep-alive pings prove the provider is still there. Deltas are concatenated
-// bare — the "\n" extract() puts between blocks cannot matter for an answer
-// the prompt requires to be one raw JSON array.
-async function readStreamText(res, p, onText, arm) {
+// chunk, which is delta(). kick() is called on every arrival, visible text or
+// not: reasoning deltas and keep-alive pings prove the provider is still
+// there. Deltas are concatenated bare — the "\n" extract() puts between
+// blocks cannot matter for an answer the prompt requires to be one raw JSON
+// array.
+async function readStreamText(res, delta, onText, kick) {
   var reader = res.body.getReader();
   var dec = new TextDecoder();
   var buf = "", acc = "";
   for (;;) {
     var step = await reader.read();
     if (step.done) break;
-    arm(STALL_MS);
+    kick();
     buf += dec.decode(step.value, { stream: true });
     var lines = buf.split("\n");
     buf = lines.pop(); // an unterminated last line waits for its next chunk
@@ -973,18 +971,51 @@ async function readStreamText(res, p, onText, arm) {
       if (!payload || payload === "[DONE]") continue;
       var chunk = null;
       try { chunk = JSON.parse(payload); } catch (e) { continue; }
-      var piece = p.delta(chunk);
+      var piece = delta(chunk);
       if (piece) { acc += piece; if (onText) onText(acc); }
     }
   }
   return acc;
 }
 
-// onText, when given, is called with the whole text accumulated so far each
-// time a streamed chunk grows it. Purely a progress report: whatever the
-// caller does with it, the answer this function returns is parsed from the
-// finished text alone.
-async function parseFood(text, onText) {
+// One tolerant read of a whole, non-streamed body: the text as it came, and
+// the JSON it parses to when it does. Failures land as empties — whether a
+// cut-off read matters, and as what, is the caller's question.
+async function readBody(res) {
+  var b = { text: "", json: null };
+  try { b.text = await res.text(); } catch (e) {}
+  try { b.json = JSON.parse(b.text); } catch (e) {}
+  return b;
+}
+
+// The model's wire items, filtered and mapped into ours — one function for
+// the committed items and the streaming preview alike, so a previewed figure
+// is structurally the figure the day would get: same filter, same clamp,
+// same words.
+function modelItems(arr) {
+  return arr
+    .filter(function (x) { return x && typeof x.name === "string"; })
+    .map(function (x) {
+      return {
+        id: newId(),
+        name: x.name,
+        amount: String(x.amount == null ? "" : x.amount),
+        protein: Math.max(0, Math.round(Number(x.protein_g) || 0)),
+        calories: Math.max(0, Math.round(Number(x.calories_kcal) || 0)),
+        // Kept as the word the model sent, not as a rank: the rank is a display
+        // decision, and a later feature may want to tell "sure" from "silent".
+        // Each figure carries its own — they are judged independently.
+        certainty: CERTAINTY.indexOf(x.certainty) < 0 ? "" : x.certainty,
+        calorieCertainty: CERTAINTY.indexOf(x.calorie_certainty) < 0 ? "" : x.calorie_certainty
+      };
+    });
+}
+
+// onItems, when given, is fed the preview while the answer streams: each call
+// gets every item completed so far, put through the same mapping the final
+// answer will get. A report, not a result — the answer this function returns
+// is parsed from the finished text alone.
+async function parseFood(text, onItems) {
   var id = provider();
   var p = PROVIDERS[id];
   // Streaming is asked for only when this browser can actually read a stream:
@@ -1006,6 +1037,15 @@ async function parseFood(text, onText) {
     if (timer) clearTimeout(timer);
     timer = setTimeout(function () { timedOut = ms; ctrl.abort(); }, ms);
   }
+  // The words for the deadline that actually fired — timedOut remembers which,
+  // so a first byte that never came is never reported as a mid-stream stall.
+  function timeoutErr() {
+    return timedOut === STALL_MS
+      ? apiError(p.host + " stalled — nothing arrived for " +
+          Math.round(STALL_MS / 1000) + "s.", "soft")
+      : apiError("No answer from " + p.host + " after " +
+          Math.round(REQUEST_MS / 1000) + "s.", "soft");
+  }
 
   try {
     arm(REQUEST_MS);
@@ -1018,13 +1058,10 @@ async function parseFood(text, onText) {
         signal: ctrl ? ctrl.signal : undefined
       });
     } catch (e) {
-      // The one abort we ask for is our own deadline above. It may well have
-      // reached the provider, so it is the entry's own problem and costs it an
-      // attempt — unlike the network failures below, which never left the phone.
-      if (timedOut || (e && e.name === "TimeoutError")) {
-        throw apiError("No answer from " + p.host + " after " +
-          Math.round(REQUEST_MS / 1000) + "s.", "soft");
-      }
+      // Our own deadline is the one abort in play. It may well have reached
+      // the provider, so it is the entry's own problem and costs it an attempt
+      // — unlike the network failures below, which never left the phone.
+      if (timedOut) throw timeoutErr();
       // fetch only rejects on network/CORS failure, never on HTTP error status.
       // The request never landed, so nothing was charged or logged.
       throw apiError("Couldn't reach " + p.host +
@@ -1034,13 +1071,10 @@ async function parseFood(text, onText) {
     // A refusal arrives as one plain JSON body whether or not streaming was
     // asked for, so the status is settled before anything touches the stream.
     if (!res.ok) {
-      var bodyText = "";
-      try { bodyText = await res.text(); } catch (e) {}
-      var data = null;
-      try { data = JSON.parse(bodyText); } catch (e) {}
+      var body = await readBody(res);
       // Surface whatever the provider said, verbatim — never swallow or reinterpret it.
-      var msg = (data && data.error && (data.error.message || data.error)) ||
-                (data && data.message) || bodyText || "no response body";
+      var msg = (body.json && body.json.error && (body.json.error.message || body.json.error)) ||
+                (body.json && body.json.message) || body.text || "no response body";
       if (typeof msg !== "string") msg = JSON.stringify(msg);
       // A 4xx is the provider's considered "no". Rate limits, timeouts and server
       // errors are the ones where the same request can still succeed later.
@@ -1051,29 +1085,30 @@ async function parseFood(text, onText) {
 
     var raw = "", fullText = "";
     if (wantStream && res.body && res.body.getReader) {
+      // The preview: objects completed so far are cut from the growing text
+      // and mapped exactly as the commit below will map them. onItems only
+      // hears when something new actually finished, not on every chunk.
+      var seen = 0;
+      var onText = onItems && function (acc) {
+        var items = modelItems(scanObjects(acc));
+        if (items.length > seen) { seen = items.length; onItems(items); }
+      };
       try {
-        raw = await readStreamText(res, p, onText, arm);
+        raw = await readStreamText(res, p.delta, onText, function () { arm(STALL_MS); });
       } catch (e) {
         // Headers made it here, so a death now is the transfer dying under us,
         // not the provider saying no — either way worth another go.
-        throw timedOut
-          ? apiError(p.host + " stalled — nothing arrived for " +
-              Math.round(STALL_MS / 1000) + "s.", "soft")
+        throw timedOut ? timeoutErr()
           : apiError("Connection to " + p.host + " dropped mid-answer.", "soft");
       }
     } else {
       // No readable stream — an old browser, or a response with no body to
       // read as one. One read of the whole answer, under the whole-answer
       // deadline, as it always was.
-      try { fullText = await res.text(); } catch (e) {
-        if (timedOut) {
-          throw apiError("No answer from " + p.host + " after " +
-            Math.round(REQUEST_MS / 1000) + "s.", "soft");
-        }
-      }
-      var full = null;
-      try { full = JSON.parse(fullText); } catch (e) {}
-      raw = p.extract(full || {});
+      var whole = await readBody(res);
+      if (timedOut) throw timeoutErr();
+      fullText = whole.text;
+      raw = p.extract(whole.json || {});
     }
 
     var clean = raw.replace(/```json|```/g, "").trim();
@@ -1088,22 +1123,7 @@ async function parseFood(text, onText) {
       throw apiError("Expected a JSON array. Response: " + clean, "soft");
     }
 
-    return arr
-      .filter(function (x) { return x && typeof x.name === "string"; })
-      .map(function (x) {
-        return {
-          id: newId(),
-          name: x.name,
-          amount: String(x.amount == null ? "" : x.amount),
-          protein: Math.max(0, Math.round(Number(x.protein_g) || 0)),
-          calories: Math.max(0, Math.round(Number(x.calories_kcal) || 0)),
-          // Kept as the word the model sent, not as a rank: the rank is a display
-          // decision, and a later feature may want to tell "sure" from "silent".
-          // Each figure carries its own — they are judged independently.
-          certainty: CERTAINTY.indexOf(x.certainty) < 0 ? "" : x.certainty,
-          calorieCertainty: CERTAINTY.indexOf(x.calorie_certainty) < 0 ? "" : x.calorie_certainty
-        };
-      });
+    return modelItems(arr);
   } finally {
     // Whichever way this ended, the clock must not fire into a later request.
     if (timer) clearTimeout(timer);
@@ -1552,7 +1572,7 @@ function pendingStatus(e) {
   var day = e.date === todayKey() ? "" : " · for " + e.date;
   if (sending[e.id]) {
     // What the stream has finished so far, read in the metric on screen. The
-    // numbers went through the same clamp the committed items will, so the
+    // items came through the same mapping the committed ones will, so the
     // preview never shows a figure the day won't.
     var m = METRICS[viewMetric];
     var live = (streamProgress[e.id] || []).map(function (x) {
@@ -1797,26 +1817,13 @@ function fileItems(list, items, at) {
 async function send(e) {
   try {
     var parsed = null, failure = null;
-    // The scan offset is this attempt's own, so overlapping streams cannot
-    // read each other's text.
-    var scanned = 0;
     try {
-      parsed = await parseFood(e.text, function (acc) {
-        var r = scanObjects(acc, scanned);
-        scanned = r.offset;
-        if (!r.objects.length) return;
-        var list = streamProgress[e.id] || (streamProgress[e.id] = []);
-        r.objects.forEach(function (x) {
-          if (!x || typeof x.name !== "string") return;
-          list.push({
-            name: x.name,
-            protein: Math.max(0, Math.round(Number(x.protein_g) || 0)),
-            calories: Math.max(0, Math.round(Number(x.calories_kcal) || 0))
-          });
-        });
-        // Only the pending list redraws: a full render() would rebuild the
-        // day, the chart and the history for every crumb of progress, and
-        // renderPending never touches an open item editor.
+      // Each preview carries every item finished so far, so it replaces the
+      // last one whole. Only the pending list redraws for it: a full render()
+      // would rebuild the day, the chart and the history for every step, and
+      // renderPending never touches an open item editor.
+      parsed = await parseFood(e.text, function (items) {
+        streamProgress[e.id] = items;
         renderPending();
       });
     } catch (err) {

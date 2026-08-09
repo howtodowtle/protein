@@ -493,6 +493,9 @@
 // opts = { thinking: "" | "on" | "off", effort: "" | <any string> }.
 // "" means send nothing and let the provider apply its own default. Values are
 // passed through verbatim — no whitelist here, so new API values keep working.
+// request() takes stream as its last argument and asks for SSE when it is set;
+// delta() is the streaming half of extract() — the visible text one SSE chunk
+// carries, "" for a chunk that carries none (pings, reasoning, stops).
 var THINKING_BUDGET = 4000; // room for reasoning tokens when thinking is on
 
 // The messages-shaped body Anthropic and the OpenAI-compatible providers agree on.
@@ -517,12 +520,13 @@ var PROVIDERS = {
     // Suggestions only — the field accepts anything and sends it verbatim.
     efforts: ["low", "medium", "high", "xhigh", "max"],
     effortNote: "output_config.effort — Claude 4.6+ only (xhigh: 4.7+). Haiku 4.5 has no effort setting.",
-    request: function (key, model, prompt, opts) {
+    request: function (key, model, prompt, opts, stream) {
       var body = chatBody(model, prompt, opts);
       // Adaptive thinking is the current form on Claude 4.6+; older models
       // (incl. the default Haiku 4.5) will reject it — the error is shown as-is.
       if (opts.thinking === "on") body.thinking = { type: "adaptive" };
       if (opts.effort) body.output_config = { effort: opts.effort };
+      if (stream) body.stream = true;
       return {
         url: "https://api.anthropic.com/v1/messages",
         headers: {
@@ -539,6 +543,12 @@ var PROVIDERS = {
         .filter(function (b) { return b.type === "text"; })
         .map(function (b) { return b.text; })
         .join("\n");
+    },
+    // thinking_delta chunks carry `thinking`, not `text` — they reset the stall
+    // clock like any arrival but contribute nothing to the answer.
+    delta: function (c) {
+      return c.type === "content_block_delta" && c.delta && typeof c.delta.text === "string"
+        ? c.delta.text : "";
     }
   },
 
@@ -549,10 +559,11 @@ var PROVIDERS = {
     keyHint: "sk-…",
     efforts: ["high", "max"],
     effortNote: "reasoning_effort — only high and max are distinct (low/medium map to high, xhigh to max).",
-    request: function (key, model, prompt, opts) {
-      return openaiRequest("https://api.deepseek.com/chat/completions", key, model, prompt, opts);
+    request: function (key, model, prompt, opts, stream) {
+      return openaiRequest("https://api.deepseek.com/chat/completions", key, model, prompt, opts, stream);
     },
-    extract: openaiExtract
+    extract: openaiExtract,
+    delta: openaiDelta
   },
 
   kimi: {
@@ -562,10 +573,11 @@ var PROVIDERS = {
     keyHint: "sk-…",
     efforts: [],
     effortNote: "reasoning_effort — not documented by Moonshot; may be ignored or rejected.",
-    request: function (key, model, prompt, opts) {
-      return openaiRequest("https://api.moonshot.ai/v1/chat/completions", key, model, prompt, opts);
+    request: function (key, model, prompt, opts, stream) {
+      return openaiRequest("https://api.moonshot.ai/v1/chat/completions", key, model, prompt, opts, stream);
     },
-    extract: openaiExtract
+    extract: openaiExtract,
+    delta: openaiDelta
   },
 
   gemini: {
@@ -575,7 +587,7 @@ var PROVIDERS = {
     keyHint: "AIza…",
     efforts: ["low", "high"],
     effortNote: "thinkingConfig.thinkingLevel — Gemini 3+ only; 2.5 uses a numeric thinkingBudget instead.",
-    request: function (key, model, prompt, opts) {
+    request: function (key, model, prompt, opts, stream) {
       var cfg = {
         responseMimeType: "application/json",
         maxOutputTokens: opts.thinking === "off" ? 2000 : THINKING_BUDGET
@@ -588,7 +600,8 @@ var PROVIDERS = {
       else if (opts.thinking === "on") cfg.thinkingConfig = { thinkingBudget: -1 };
       return {
         url: "https://generativelanguage.googleapis.com/v1beta/models/" +
-             encodeURIComponent(model) + ":generateContent",
+             encodeURIComponent(model) +
+             (stream ? ":streamGenerateContent?alt=sse" : ":generateContent"),
         headers: {
           "x-goog-api-key": key,
           "content-type": "application/json"
@@ -603,15 +616,24 @@ var PROVIDERS = {
       var cand = (data.candidates || [])[0];
       var parts = (cand && cand.content && cand.content.parts) || [];
       return parts.map(function (p) { return p.text || ""; }).join("\n");
+    },
+    // A streamed chunk is shaped like a whole generateContent response, just
+    // holding less of it. Gemini sends no thinking deltas — with thinking on
+    // it is simply silent until the answer itself starts.
+    delta: function (c) {
+      var cand = (c.candidates || [])[0];
+      var parts = (cand && cand.content && cand.content.parts) || [];
+      return parts.map(function (p) { return p.text || ""; }).join("");
     }
   }
 };
 
 // OpenAI-compatible chat/completions shape, shared by DeepSeek and Kimi.
-function openaiRequest(url, key, model, prompt, opts) {
+function openaiRequest(url, key, model, prompt, opts, stream) {
   var body = chatBody(model, prompt, opts);
   if (opts.thinking === "on") body.thinking = { type: "enabled" };
   if (opts.effort) body.reasoning_effort = opts.effort;
+  if (stream) body.stream = true;
   return {
     url: url,
     headers: {
@@ -624,6 +646,13 @@ function openaiRequest(url, key, model, prompt, opts) {
 function openaiExtract(data) {
   var choice = (data.choices || [])[0];
   return (choice && choice.message && choice.message.content) || "";
+}
+// DeepSeek's reasoning chunks carry `reasoning_content` and a null `content`,
+// so only a string counts as answer text.
+function openaiDelta(data) {
+  var choice = (data.choices || [])[0];
+  return (choice && choice.delta && typeof choice.delta.content === "string")
+    ? choice.delta.content : "";
 }
 
 var PROVIDER_IDS = Object.keys(PROVIDERS);
@@ -882,84 +911,203 @@ function apiError(msg, retry) {
 
 // A request nobody cuts off can stay open for as long as the phone lets it, and
 // a suspended app can leave one open for good. Without this the queue waits on
-// that one request forever — no browser applies a timeout of its own. Generous
-// enough that a slow thinking model still finishes inside it.
+// that one request forever — no browser applies a timeout of its own. Two
+// deadlines, because a stream changes what "silent" means:
+//   REQUEST_MS — the wait for the first byte of the answer (and, where the
+//     response cannot be read as a stream, for all of it). Generous, because a
+//     thinking model can be genuinely byteless before its first token — Gemini
+//     does not stream its thoughts.
+//   STALL_MS — once bytes flow, the gap that means the stream is dead. Anthropic
+//     thinking deltas and pings are bytes on the wire like any other, so a model
+//     visibly thinking is never "silent" here. A stream that keeps trickling is
+//     bounded by max_tokens, not by us.
 var REQUEST_MS = 60000;
+var STALL_MS = 25000;
 
-async function parseFood(text) {
+// Finds the completed top-level objects of the JSON array while it is still
+// arriving. Display only: the full text is re-parsed once the stream ends, so
+// this can afford to be tolerant — on garbage (fences, prose, half a token) it
+// emits nothing, and it never throws. `from` is how far a previous call got, so
+// an object is surfaced exactly once however the chunks split it.
+function scanObjects(text, from) {
+  var out = [], depth = 0, inStr = false, esc = false, start = -1;
+  for (var i = from; i < text.length; i++) {
+    var c = text.charAt(i);
+    if (inStr) {
+      if (esc) esc = false;
+      else if (c === "\\") esc = true;
+      else if (c === '"') inStr = false;
+    }
+    else if (c === '"') inStr = true;
+    else if (c === "{") { if (depth === 0) start = i; depth++; }
+    else if (c === "}" && depth > 0 && --depth === 0 && start >= 0) {
+      try { out.push(JSON.parse(text.slice(start, i + 1))); } catch (e) {}
+      from = i + 1; start = -1;
+    }
+  }
+  return { objects: out, offset: from };
+}
+
+// Reads an SSE response to its end and returns the text the model produced.
+// All three providers frame streaming the same way — "data: {json}" lines,
+// blank-line separated — and differ only in where the text sits inside a
+// chunk, which is each one's delta(). Every arrival pushes the stall deadline
+// back, whether or not it carried visible text: reasoning deltas and
+// keep-alive pings prove the provider is still there. Deltas are concatenated
+// bare — the "\n" extract() puts between blocks cannot matter for an answer
+// the prompt requires to be one raw JSON array.
+async function readStreamText(res, p, onText, arm) {
+  var reader = res.body.getReader();
+  var dec = new TextDecoder();
+  var buf = "", acc = "";
+  for (;;) {
+    var step = await reader.read();
+    if (step.done) break;
+    arm(STALL_MS);
+    buf += dec.decode(step.value, { stream: true });
+    var lines = buf.split("\n");
+    buf = lines.pop(); // an unterminated last line waits for its next chunk
+    for (var i = 0; i < lines.length; i++) {
+      if (lines[i].slice(0, 5) !== "data:") continue;
+      var payload = lines[i].slice(5).trim(); // trim also drops a CR
+      if (!payload || payload === "[DONE]") continue;
+      var chunk = null;
+      try { chunk = JSON.parse(payload); } catch (e) { continue; }
+      var piece = p.delta(chunk);
+      if (piece) { acc += piece; if (onText) onText(acc); }
+    }
+  }
+  return acc;
+}
+
+// onText, when given, is called with the whole text accumulated so far each
+// time a streamed chunk grows it. Purely a progress report: whatever the
+// caller does with it, the answer this function returns is parsed from the
+// finished text alone.
+async function parseFood(text, onText) {
   var id = provider();
   var p = PROVIDERS[id];
-  var req = p.request(apiKey(id), modelFor(id), PARSE_PROMPT + JSON.stringify(text), optsFor(id));
+  // Streaming is asked for only when this browser can actually read a stream:
+  // the flag changes what the server sends back, so it is never requested on
+  // faith and left unreadable.
+  var wantStream = typeof ReadableStream !== "undefined" &&
+                   typeof TextDecoder !== "undefined" && !!p.delta;
+  var req = p.request(apiKey(id), modelFor(id), PARSE_PROMPT + JSON.stringify(text), optsFor(id), wantStream);
 
-  var res;
+  // One clock for both waits: armed for the whole-answer deadline before the
+  // request goes out, re-armed for the shorter stall gap by every chunk that
+  // arrives. Firing aborts the request and keeps which wait ran out — a plain
+  // abort throws AbortError, and the error shown should say what actually
+  // happened, not just that something was cut off.
+  var ctrl = typeof AbortController !== "undefined" ? new AbortController() : null;
+  var timer = null, timedOut = 0;
+  function arm(ms) {
+    if (!ctrl) return;
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(function () { timedOut = ms; ctrl.abort(); }, ms);
+  }
+
   try {
-    res = await fetch(req.url, {
-      method: "POST",
-      headers: req.headers,
-      body: JSON.stringify(req.body),
-      signal: typeof AbortSignal !== "undefined" && AbortSignal.timeout
-        ? AbortSignal.timeout(REQUEST_MS) : undefined
-    });
-  } catch (e) {
-    // The one abort we ask for is the timeout above. It may well have reached the
-    // provider, so it is the entry's own problem and costs it an attempt —
-    // unlike the network failures below, which never left the phone.
-    if (e && e.name === "TimeoutError") {
-      throw apiError("No answer from " + p.host + " after " +
-        Math.round(REQUEST_MS / 1000) + "s.", "soft");
+    arm(REQUEST_MS);
+    var res;
+    try {
+      res = await fetch(req.url, {
+        method: "POST",
+        headers: req.headers,
+        body: JSON.stringify(req.body),
+        signal: ctrl ? ctrl.signal : undefined
+      });
+    } catch (e) {
+      // The one abort we ask for is our own deadline above. It may well have
+      // reached the provider, so it is the entry's own problem and costs it an
+      // attempt — unlike the network failures below, which never left the phone.
+      if (timedOut || (e && e.name === "TimeoutError")) {
+        throw apiError("No answer from " + p.host + " after " +
+          Math.round(REQUEST_MS / 1000) + "s.", "soft");
+      }
+      // fetch only rejects on network/CORS failure, never on HTTP error status.
+      // The request never landed, so nothing was charged or logged.
+      throw apiError("Couldn't reach " + p.host +
+        " — network error, or the provider blocks browser requests (CORS).", "defer");
     }
-    // fetch only rejects on network/CORS failure, never on HTTP error status.
-    // The request never landed, so nothing was charged or logged.
-    throw apiError("Couldn't reach " + p.host +
-      " — network error, or the provider blocks browser requests (CORS).", "defer");
+
+    // A refusal arrives as one plain JSON body whether or not streaming was
+    // asked for, so the status is settled before anything touches the stream.
+    if (!res.ok) {
+      var bodyText = "";
+      try { bodyText = await res.text(); } catch (e) {}
+      var data = null;
+      try { data = JSON.parse(bodyText); } catch (e) {}
+      // Surface whatever the provider said, verbatim — never swallow or reinterpret it.
+      var msg = (data && data.error && (data.error.message || data.error)) ||
+                (data && data.message) || bodyText || "no response body";
+      if (typeof msg !== "string") msg = JSON.stringify(msg);
+      // A 4xx is the provider's considered "no". Rate limits, timeouts and server
+      // errors are the ones where the same request can still succeed later.
+      var soft = res.status < 400 || res.status >= 500 ||
+                 res.status === 408 || res.status === 429;
+      throw apiError(p.host + " HTTP " + res.status + ": " + msg, soft ? "soft" : "terminal");
+    }
+
+    var raw = "", fullText = "";
+    if (wantStream && res.body && res.body.getReader) {
+      try {
+        raw = await readStreamText(res, p, onText, arm);
+      } catch (e) {
+        // Headers made it here, so a death now is the transfer dying under us,
+        // not the provider saying no — either way worth another go.
+        throw timedOut
+          ? apiError(p.host + " stalled — nothing arrived for " +
+              Math.round(STALL_MS / 1000) + "s.", "soft")
+          : apiError("Connection to " + p.host + " dropped mid-answer.", "soft");
+      }
+    } else {
+      // No readable stream — an old browser, or a response with no body to
+      // read as one. One read of the whole answer, under the whole-answer
+      // deadline, as it always was.
+      try { fullText = await res.text(); } catch (e) {
+        if (timedOut) {
+          throw apiError("No answer from " + p.host + " after " +
+            Math.round(REQUEST_MS / 1000) + "s.", "soft");
+        }
+      }
+      var full = null;
+      try { full = JSON.parse(fullText); } catch (e) {}
+      raw = p.extract(full || {});
+    }
+
+    var clean = raw.replace(/```json|```/g, "").trim();
+
+    var arr;
+    try {
+      arr = JSON.parse(clean);
+    } catch (e) {
+      throw apiError("Model did not return JSON. Response: " + (clean || fullText || "empty"), "soft");
+    }
+    if (!Array.isArray(arr)) {
+      throw apiError("Expected a JSON array. Response: " + clean, "soft");
+    }
+
+    return arr
+      .filter(function (x) { return x && typeof x.name === "string"; })
+      .map(function (x) {
+        return {
+          id: newId(),
+          name: x.name,
+          amount: String(x.amount == null ? "" : x.amount),
+          protein: Math.max(0, Math.round(Number(x.protein_g) || 0)),
+          calories: Math.max(0, Math.round(Number(x.calories_kcal) || 0)),
+          // Kept as the word the model sent, not as a rank: the rank is a display
+          // decision, and a later feature may want to tell "sure" from "silent".
+          // Each figure carries its own — they are judged independently.
+          certainty: CERTAINTY.indexOf(x.certainty) < 0 ? "" : x.certainty,
+          calorieCertainty: CERTAINTY.indexOf(x.calorie_certainty) < 0 ? "" : x.calorie_certainty
+        };
+      });
+  } finally {
+    // Whichever way this ended, the clock must not fire into a later request.
+    if (timer) clearTimeout(timer);
   }
-
-  var bodyText = "";
-  try { bodyText = await res.text(); } catch (e) {}
-  var data = null;
-  try { data = JSON.parse(bodyText); } catch (e) {}
-
-  if (!res.ok) {
-    // Surface whatever the provider said, verbatim — never swallow or reinterpret it.
-    var msg = (data && data.error && (data.error.message || data.error)) ||
-              (data && data.message) || bodyText || "no response body";
-    if (typeof msg !== "string") msg = JSON.stringify(msg);
-    // A 4xx is the provider's considered "no". Rate limits, timeouts and server
-    // errors are the ones where the same request can still succeed later.
-    var soft = res.status < 400 || res.status >= 500 ||
-               res.status === 408 || res.status === 429;
-    throw apiError(p.host + " HTTP " + res.status + ": " + msg, soft ? "soft" : "terminal");
-  }
-
-  var raw = p.extract(data || {});
-  var clean = raw.replace(/```json|```/g, "").trim();
-
-  var arr;
-  try {
-    arr = JSON.parse(clean);
-  } catch (e) {
-    throw apiError("Model did not return JSON. Response: " + (clean || bodyText || "empty"), "soft");
-  }
-  if (!Array.isArray(arr)) {
-    throw apiError("Expected a JSON array. Response: " + clean, "soft");
-  }
-
-  return arr
-    .filter(function (x) { return x && typeof x.name === "string"; })
-    .map(function (x) {
-      return {
-        id: newId(),
-        name: x.name,
-        amount: String(x.amount == null ? "" : x.amount),
-        protein: Math.max(0, Math.round(Number(x.protein_g) || 0)),
-        calories: Math.max(0, Math.round(Number(x.calories_kcal) || 0)),
-        // Kept as the word the model sent, not as a rank: the rank is a display
-        // decision, and a later feature may want to tell "sure" from "silent".
-        // Each figure carries its own — they are judged independently.
-        certainty: CERTAINTY.indexOf(x.certainty) < 0 ? "" : x.certainty,
-        calorieCertainty: CERTAINTY.indexOf(x.calorie_certainty) < 0 ? "" : x.calorie_certainty
-      };
-    });
 }
 
 // ---------- elements ----------
@@ -1371,7 +1519,9 @@ function editRow(it) {
 // Pending entries live outside the day totals: their protein is unknown until
 // parsed, so counting them would make the headline number lie. They are listed
 // separately, and carry their own date because an entry queued last night must
-// land on last night's day even if it only sends this morning.
+// land on last night's day even if it only sends this morning. While one is
+// estimating, its row previews the items its stream has already finished —
+// numbers to read while waiting, never numbers in the total.
 function renderPending() {
   var q = loadQueue();
   pendingEl.innerHTML = "";
@@ -1400,7 +1550,16 @@ function renderPending() {
 
 function pendingStatus(e) {
   var day = e.date === todayKey() ? "" : " · for " + e.date;
-  if (sending[e.id]) return "estimating…" + day;
+  if (sending[e.id]) {
+    // What the stream has finished so far, read in the metric on screen. The
+    // numbers went through the same clamp the committed items will, so the
+    // preview never shows a figure the day won't.
+    var m = METRICS[viewMetric];
+    var live = (streamProgress[e.id] || []).map(function (x) {
+      return x.name + " " + x[m.field] + " " + m.unit;
+    }).join(" · ");
+    return "estimating…" + (live ? " " + live : "") + day;
+  }
   if (e.parked) return e.error || "Failed.";
   if (!apiKey()) return "waiting for an API key" + day;
   if (!navigator.onLine) return "waiting for a connection" + day;
@@ -1556,6 +1715,10 @@ var MAX_ATTEMPTS = RETRY_MS.length + 1;
 var HOLD_MS = 15000;
 
 var sending = {};   // entry id -> true while its request is in flight
+// entry id -> items its stream has completed so far. Display only, and in
+// memory only, like the flag above: nothing here is ever stored, so a crash
+// mid-stream leaves the entry queued exactly as if it had never started.
+var streamProgress = {};
 var cooling = {};   // entry id -> ms timestamp before which it is not worth retrying
 var holdUntil = 0;  // ms timestamp: nothing goes out before this
 var retryTimer = null;
@@ -1634,8 +1797,28 @@ function fileItems(list, items, at) {
 async function send(e) {
   try {
     var parsed = null, failure = null;
+    // The scan offset is this attempt's own, so overlapping streams cannot
+    // read each other's text.
+    var scanned = 0;
     try {
-      parsed = await parseFood(e.text);
+      parsed = await parseFood(e.text, function (acc) {
+        var r = scanObjects(acc, scanned);
+        scanned = r.offset;
+        if (!r.objects.length) return;
+        var list = streamProgress[e.id] || (streamProgress[e.id] = []);
+        r.objects.forEach(function (x) {
+          if (!x || typeof x.name !== "string") return;
+          list.push({
+            name: x.name,
+            protein: Math.max(0, Math.round(Number(x.protein_g) || 0)),
+            calories: Math.max(0, Math.round(Number(x.calories_kcal) || 0))
+          });
+        });
+        // Only the pending list redraws: a full render() would rebuild the
+        // day, the chart and the history for every crumb of progress, and
+        // renderPending never touches an open item editor.
+        renderPending();
+      });
     } catch (err) {
       failure = err;
     }
@@ -1668,9 +1851,11 @@ async function send(e) {
       parked ? 0 : Date.now() + RETRY_MS[attempts - 1]);
   } finally {
     // The one redraw for whatever this settled on — the day it wrote, or the
-    // error it recorded. It comes after the flag, since before that the row
-    // would only draw as "estimating…" again.
+    // error it recorded. It comes after the flags, since before that the row
+    // would only draw as "estimating…" again. The progress preview dies with
+    // them: the committed rows, or the error, are what replace it.
     delete sending[e.id];
+    delete streamProgress[e.id];
     render();
     drain();  // a slot just came free
   }

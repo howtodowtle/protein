@@ -1245,7 +1245,8 @@ const geminiStore = () => ({ "protein.provider": "gemini", "protein.apiKey.gemin
     check("asked again without thinking", bodies.length === 2, bodies.length);
     check("and told the provider so", bodies[1].thinking.type === "disabled", bodies[1]);
     check("with the effort dropped too", bodies[1].reasoning_effort === undefined, bodies[1]);
-    check("and an answer-sized budget", bodies[1].max_tokens === 2000, bodies[1]);
+    check("keeping every token the thinking had been using",
+      bodies[1].max_tokens === bodies[0].max_tokens, bodies.map((b) => b.max_tokens));
     check("the second answer landed", only(h).protein === 35, days(h));
     check("queue drained", q(h).length === 0, q(h));
   }
@@ -1334,9 +1335,69 @@ const geminiStore = () => ({ "protein.provider": "gemini", "protein.apiKey.gemin
     check("and the retry landed", only(h).protein === 25, days(h));
   }
 
-  // ---- 45. a model that simply wrote prose still says so in one line
+  // ---- 45. thinking can overrun a clock as easily as a token budget, and the
+  //          remedy is the same one. A stall is not this: that is a dead
+  //          connection, which says nothing about what was asked.
   {
-    console.log("45. long garbage is cut to a line");
+    console.log("45. thinking that outlasts the clock");
+    const bodies = [];
+    const h = makeHarness({
+      store: { ...dsStore(), "protein.thinking.deepseek": "on" },
+      fetchImpl: (url, init) => {
+        bodies.push(JSON.parse(init.body));
+        // The first try never answers and is cut off by the whole-request clock;
+        // the try that follows is the one that has to arrive.
+        if (bodies.length === 1) return abortsWith(init.signal);
+        return sse([oDelta('[{"name":"Eggs","amount":"4","protein_g":25,"certainty":"high","calories_kcal":360,"calorie_certainty":"high"}]')]);
+      },
+    });
+    h.ctx.REQUEST_MS = 20;
+    h.ctx.RETRY_MS[0] = 60;   // long enough to still be waiting at the first checks
+    h.els["food-input"].value = "4 eggs";
+    h.els["log-btn"].click();
+    await settle();
+    check("named as the wait that ran out",
+      q(h).length === 1 && /No answer from/.test(q(h)[0].error), q(h));
+    check("marked for the try without thinking", q(h)[0].noThink === true, q(h)[0]);
+    await settle(120);
+    check("which went out without it",
+      bodies.length === 2 && bodies[1].thinking.type === "disabled", bodies[1]);
+    // Dropping the thinking must not drop the room to answer in with. The first
+    // try lost to a clock, not to a ceiling, so a retry that quietly asked for an
+    // eighth of the tokens could truncate where the original would not have — and
+    // a truncation with text before it is terminal, so it would park the entry
+    // and blame the length of the meal for what was the provider being slow.
+    check("with no less room than the try that timed out",
+      bodies[1].max_tokens === bodies[0].max_tokens, bodies.map((b) => b.max_tokens));
+    check("and landed", only(h).protein === 25, days(h));
+  }
+
+  // ---- 46. a stall is a dead connection, not thinking that ran long, so the
+  //          same request is still the one worth making
+  {
+    console.log("46. a stall is not an overrun");
+    const h = makeHarness({
+      store: { ...dsStore(), "protein.thinking.deepseek": "on" },
+      fetchImpl: async (url, init) => sse([oReason("thinking… "), () => abortsWith(init.signal)]),
+    });
+    h.ctx.STALL_MS = 20;
+    h.ctx.RETRY_MS[0] = 40;
+    h.els["food-input"].value = "4 eggs";
+    h.els["log-btn"].click();
+    await settle();
+    check("named as the stall it was", /stalled/.test(q(h)[0].error), q(h)[0].error);
+    check("and not blamed on the thinking", q(h)[0].noThink === undefined, q(h)[0]);
+    // Sat out rather than abandoned mid-flight: the retry this scheduled would
+    // otherwise land during a later scenario, and the harnesses share the focused
+    // element between them.
+    await settle(120);
+    check("the retry stalls the same way and is still not blamed on it",
+      q(h)[0].attempts === 2 && q(h)[0].noThink === undefined, q(h)[0]);
+  }
+
+  // ---- 47. a model that simply wrote prose still says so in one line
+  {
+    console.log("47. long garbage is cut to a line");
     const h = makeHarness({
       streamCapable: false, store: baseStore(),
       fetchImpl: async () => aWhole("Here is the JSON array you asked for.\n".repeat(150)),
@@ -1351,11 +1412,11 @@ const geminiStore = () => ({ "protein.provider": "gemini", "protein.apiKey.gemin
     check("no newlines of its own", !/\n/.test(err), err);
   }
 
-  // ---- 46. the budget the request actually carries, which is the whole bug:
+  // ---- 48. the budget the request actually carries, which is the whole bug:
   //          a model left on its provider's default reasons anyway, so the
   //          default gets the room too
   {
-    console.log("46. the budget on the wire");
+    console.log("48. the budget on the wire");
     // What one request put on the wire, for a store and the wire format that
     // store speaks. The answer is empty because nothing here reads it.
     const sentFor = async (store, delta = oDelta) => {
@@ -1387,7 +1448,10 @@ const geminiStore = () => ({ "protein.provider": "gemini", "protein.apiKey.gemin
     // would 400 on every request the moment thinking was anything but off.
     check("and asks it of a model that can take it", on.model === "deepseek-v4-flash", on.model);
     check("so does the provider default", byDefault.max_tokens === 16000, byDefault.max_tokens);
-    check("thinking off gets room to answer", off.max_tokens === 2000, off.max_tokens);
+    // And so does thinking off, which is the point: the setting says whether to
+    // think, not how much room the answer gets. A smaller ceiling here is what
+    // made turning thinking off cost an entry its answer.
+    check("and so does thinking off", off.max_tokens === 16000, off.max_tokens);
     check("and gemini says the same in its own words",
       gem.generationConfig.maxOutputTokens === 16000, gem.generationConfig);
     check("an effort cannot turn thinking back on",
@@ -1395,9 +1459,9 @@ const geminiStore = () => ({ "protein.provider": "gemini", "protein.apiKey.gemin
       gemOffWithEffort.generationConfig);
   }
 
-  // ---- 47. a photo rides the entry: queued, on the wire, gone once logged
+  // ---- 49. a photo rides the entry: queued, on the wire, gone once logged
   {
-    console.log("47. photo + text");
+    console.log("49. photo + text");
     const img = { mediaType: "image/jpeg", data: "AAAA" };
     let sentBody = null;
     const h = makeHarness({
@@ -1418,9 +1482,9 @@ const geminiStore = () => ({ "protein.provider": "gemini", "protein.apiKey.gemin
     check("queue drained", q(h).length === 0, q(h));
   }
 
-  // ---- 48. photo alone is an entry: its own prompt, its own face in the list
+  // ---- 50. photo alone is an entry: its own prompt, its own face in the list
   {
-    console.log("48. photo only");
+    console.log("50. photo only");
     const img = { mediaType: "image/jpeg", data: "BBBB" };
     const g = gate();
     let sentBody = null;
@@ -1449,9 +1513,9 @@ const geminiStore = () => ({ "protein.provider": "gemini", "protein.apiKey.gemin
     check("queue drained", q(h).length === 0, q(h));
   }
 
-  // ---- 49. text alone is the request it always was — the photo left no trace
+  // ---- 51. text alone is the request it always was — the photo left no trace
   {
-    console.log("49. text-only unchanged");
+    console.log("51. text-only unchanged");
     let sentBody = null;
     const h = makeHarness({
       store: baseStore(),
@@ -1466,9 +1530,9 @@ const geminiStore = () => ({ "protein.provider": "gemini", "protein.apiKey.gemin
     check("no photo wording anywhere in it", !/photo/i.test(content));
   }
 
-  // ---- 50. each provider dresses the same photo in its own wire format
+  // ---- 52. each provider dresses the same photo in its own wire format
   {
-    console.log("50. provider photo shapes");
+    console.log("52. provider photo shapes");
     const img = { mediaType: "image/jpeg", data: "CCCC" };
     const gItem = gDelta('[{"name":"Reis","amount":"~200 g","protein_g":5,"certainty":"medium","calories_kcal":260,"calorie_certainty":"medium"}]');
     let gBody = null;
@@ -1506,11 +1570,11 @@ const geminiStore = () => ({ "protein.provider": "gemini", "protein.apiKey.gemin
     check("openai-compatible: a data URL", dc[0].image_url.url === "data:image/jpeg;base64,CCCC" && dc[1].type === "text", dc);
   }
 
-  // ---- 51. shrinking a photo takes long enough for the box to move on, and
+  // ---- 53. shrinking a photo takes long enough for the box to move on, and
   //          what it moved on to wins: a photo that lands late must not undo
   //          the × that dismissed it, nor ride along on the next entry.
   {
-    console.log("51. a photo that arrives late");
+    console.log("53. a photo that arrives late");
     const img = { mediaType: "image/jpeg", data: "DDDD" };
     // The picker, driven the way a phone drives it, with the shrinking held
     // open so the test can act while it is still going.
@@ -1567,10 +1631,10 @@ const geminiStore = () => ({ "protein.provider": "gemini", "protein.apiKey.gemin
     }
   }
 
-  // ---- 52. the thumbnail is built once and moved, not decoded again on every
+  // ---- 54. the thumbnail is built once and moved, not decoded again on every
   //          redraw the streaming preview asks for
   {
-    console.log("52. one thumbnail per queued photo");
+    console.log("54. one thumbnail per queued photo");
     const g = gate();
     const h = makeHarness({
       store: baseStore(),

@@ -501,29 +501,21 @@
 // closes a stream say it in the same place, so one function reads either.
 
 // Room for the answer and, where the provider charges thinking against the same
-// ceiling, for the thinking that comes first. A model that keeps its reasoning
-// off this budget simply never needs the extra room, so it is sized for the ones
-// that do. Bounded from both sides, which leaves one number rather than one per
+// ceiling, for the thinking that comes first. One number for both, and for every
 // provider: it has to clear what the thinking actually costs, and 4000 did not
 // (a model spent every one of them deliberating and had none left to answer
 // with), and it has to stay under the lowest output ceiling of the models this
 // app asks for, every one of which is 64k or more. Nothing is charged for room
 // left unused, so the number leans generous: the only thing this ceiling should
-// ever stop is a model that has lost the thread entirely — and note that at
-// typical speeds REQUEST_MS, not this, is what ends such a request first.
-var THINKING_BUDGET = 16000;
-// Thinking off: the array is all that is coming. Seven items at six fields each is
-// ~400 tokens, so the 500 this replaces was one long dinner from cutting itself off.
-var ANSWER_BUDGET = 2000;
-
-// Only an explicit "off" is known not to think. A provider default is whatever
-// the model does unprompted, and on a reasoning model that is thinking — so the
-// default gets the room too, rather than the answer-sized cap it used to. Asked
-// in one place because two wire formats spell the field differently and would
-// otherwise be two ternaries that have to agree.
-function maxTokens(opts) {
-  return opts.thinking === "off" ? ANSWER_BUDGET : THINKING_BUDGET;
-}
+// ever stop is a model that has lost the thread entirely — and at typical speeds
+// REQUEST_MS, not this, is what ends such a request first.
+// A second, answer-sized number used to apply when thinking was off, on the
+// reasoning that an array is all that is coming. It cost more than it saved: the
+// retry that turns thinking off shares that setting, so dropping the thinking
+// silently dropped the room to answer in too, and an answer that then overran
+// its smaller ceiling parked the entry blaming the length of the meal. A cap is
+// not a spend. Nothing was being saved to begin with.
+var OUTPUT_BUDGET = 16000;
 
 // The messages-shaped body Anthropic and the OpenAI-compatible providers agree on.
 // Only the "thinking on" type string and where effort lands actually differ, so
@@ -531,7 +523,7 @@ function maxTokens(opts) {
 function chatBody(model, prompt, opts, stream) {
   var body = {
     model: model,
-    max_tokens: maxTokens(opts),
+    max_tokens: OUTPUT_BUDGET,
     messages: [{ role: "user", content: prompt }]
   };
   if (opts.thinking === "off") body.thinking = { type: "disabled" };
@@ -588,7 +580,7 @@ var PROVIDERS = {
     label: "DeepSeek",
     host: "api.deepseek.com",
     // The current model, and the one with the headroom: deepseek-chat is the
-    // older one and caps max_tokens at 8k, under THINKING_BUDGET, so asking for
+    // older one and caps max_tokens at 8k, under OUTPUT_BUDGET, so asking for
     // it would 400 every request the moment thinking was anything but off. A
     // model you set yourself still wins; only an unconfigured provider lands here.
     model: "deepseek-v4-flash",
@@ -628,7 +620,7 @@ var PROVIDERS = {
     request: function (key, model, prompt, opts, stream) {
       var cfg = {
         responseMimeType: "application/json",
-        maxOutputTokens: maxTokens(opts)
+        maxOutputTokens: OUTPUT_BUDGET
       };
       // thinkingBudget: 0 disables, -1 lets the model decide, and Gemini 3+ calls
       // the effort dial thinkingLevel — one field, three ways to set it, so one
@@ -2066,7 +2058,13 @@ async function send(e) {
     // reload and the request that follows goes out without reasoning. Set rather
     // than assigned, because a downgraded try that then fails softly must keep
     // going out downgraded.
-    var downgrade = failure.retry === "downgrade";
+    // The `!e.noThink` is belt as well as braces: both producers of the class
+    // read opts.thinking, which parseFood has already forced to "off" on a
+    // downgraded try, so neither can ask twice. That invariant runs through five
+    // functions and a storage round-trip, and what it is holding back is an
+    // entry that never parks and buys a request every time it does not — too
+    // much to rest on a chain that long when saying it here costs a boolean.
+    var downgrade = failure.retry === "downgrade" && !e.noThink;
     var parked = !downgrade && (failure.retry === "terminal" || attempts >= MAX_ATTEMPTS);
     var patch = { attempts: attempts, error: msg, parked: parked };
     if (downgrade) patch.noThink = true;

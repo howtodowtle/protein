@@ -1240,7 +1240,8 @@ const dsStore = () => ({ "protein.provider": "deepseek", "protein.apiKey.deepsee
     check("asked again without thinking", bodies.length === 2, bodies.length);
     check("and told the provider so", bodies[1].thinking.type === "disabled", bodies[1]);
     check("with the effort dropped too", bodies[1].reasoning_effort === undefined, bodies[1]);
-    check("and an answer-sized budget", bodies[1].max_tokens === 2000, bodies[1]);
+    check("keeping every token the thinking had been using",
+      bodies[1].max_tokens === bodies[0].max_tokens, bodies.map((b) => b.max_tokens));
     check("the second answer landed", only(h).protein === 35, days(h));
     check("queue drained", q(h).length === 0, q(h));
   }
@@ -1334,14 +1335,14 @@ const dsStore = () => ({ "protein.provider": "deepseek", "protein.apiKey.deepsee
   //          connection, which says nothing about what was asked.
   {
     console.log("45. thinking that outlasts the clock");
-    let calls = 0;
+    const bodies = [];
     const h = makeHarness({
       store: { ...dsStore(), "protein.thinking.deepseek": "on" },
       fetchImpl: (url, init) => {
-        calls++;
+        bodies.push(JSON.parse(init.body));
         // The first try never answers and is cut off by the whole-request clock;
         // the try that follows is the one that has to arrive.
-        if (calls === 1) return abortsWith(init.signal);
+        if (bodies.length === 1) return abortsWith(init.signal);
         return sse([oDelta('[{"name":"Eggs","amount":"4","protein_g":25,"certainty":"high","calories_kcal":360,"calorie_certainty":"high"}]')]);
       },
     });
@@ -1350,11 +1351,20 @@ const dsStore = () => ({ "protein.provider": "deepseek", "protein.apiKey.deepsee
     h.els["food-input"].value = "4 eggs";
     h.els["log-btn"].click();
     await settle();
-    check("named as the wait that ran out", /No answer from/.test(q(h)[0].error), q(h)[0].error);
+    check("named as the wait that ran out",
+      q(h).length === 1 && /No answer from/.test(q(h)[0].error), q(h));
     check("marked for the try without thinking", q(h)[0].noThink === true, q(h)[0]);
-    check("not parked while that try is left", q(h)[0].parked === false, q(h)[0]);
     await settle(120);
-    check("which went out without it", calls === 2 && only(h).protein === 25, days(h));
+    check("which went out without it",
+      bodies.length === 2 && bodies[1].thinking.type === "disabled", bodies[1]);
+    // Dropping the thinking must not drop the room to answer in with. The first
+    // try lost to a clock, not to a ceiling, so a retry that quietly asked for an
+    // eighth of the tokens could truncate where the original would not have — and
+    // a truncation with text before it is terminal, so it would park the entry
+    // and blame the length of the meal for what was the provider being slow.
+    check("with no less room than the try that timed out",
+      bodies[1].max_tokens === bodies[0].max_tokens, bodies.map((b) => b.max_tokens));
+    check("and landed", only(h).protein === 25, days(h));
   }
 
   // ---- 46. a stall is a dead connection, not thinking that ran long, so the
@@ -1366,12 +1376,18 @@ const dsStore = () => ({ "protein.provider": "deepseek", "protein.apiKey.deepsee
       fetchImpl: async (url, init) => sse([oReason("thinking… "), () => abortsWith(init.signal)]),
     });
     h.ctx.STALL_MS = 20;
-    h.ctx.RETRY_MS[0] = 60;
+    h.ctx.RETRY_MS[0] = 40;
     h.els["food-input"].value = "4 eggs";
     h.els["log-btn"].click();
     await settle();
     check("named as the stall it was", /stalled/.test(q(h)[0].error), q(h)[0].error);
     check("and not blamed on the thinking", q(h)[0].noThink === undefined, q(h)[0]);
+    // Sat out rather than abandoned mid-flight: the retry this scheduled would
+    // otherwise land during a later scenario, and the harnesses share the focused
+    // element between them.
+    await settle(120);
+    check("the retry stalls the same way and is still not blamed on it",
+      q(h)[0].attempts === 2 && q(h)[0].noThink === undefined, q(h)[0]);
   }
 
   // ---- 47. a model that simply wrote prose still says so in one line
@@ -1427,7 +1443,10 @@ const dsStore = () => ({ "protein.provider": "deepseek", "protein.apiKey.deepsee
     // would 400 on every request the moment thinking was anything but off.
     check("and asks it of a model that can take it", on.model === "deepseek-v4-flash", on.model);
     check("so does the provider default", byDefault.max_tokens === 16000, byDefault.max_tokens);
-    check("thinking off gets room to answer", off.max_tokens === 2000, off.max_tokens);
+    // And so does thinking off, which is the point: the setting says whether to
+    // think, not how much room the answer gets. A smaller ceiling here is what
+    // made turning thinking off cost an entry its answer.
+    check("and so does thinking off", off.max_tokens === 16000, off.max_tokens);
     check("and gemini says the same in its own words",
       gem.generationConfig.maxOutputTokens === 16000, gem.generationConfig);
     check("an effort cannot turn thinking back on",

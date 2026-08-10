@@ -161,30 +161,26 @@
     display: block; width: 100%; border: none; resize: none; padding: 12px;
   }
   #food-input:focus { outline: none; }
-  /* Photo and Log it share the box's bottom edge, split like the metric
-     segments above: the white one carries the divider, the black one needs
-     none. The file input itself never draws — the button is the way in. */
+  /* Photo and Log it share the box's bottom edge, divided the way the metric
+     segments above are divided: by a rule between siblings, so which button
+     carries it is never a question anyone has to answer again. The file input
+     itself never draws — the button is the way in. */
   #photo-input { display: none; }
   .entry-actions { display: flex; border-top: 2px solid #111; }
-  #photo-btn {
-    background: #fff; color: #111; border: none; border-right: 2px solid #111;
-    font: inherit; font-weight: 700; font-size: 16px; padding: 12px 16px; cursor: pointer;
+  .entry-actions button {
+    border: none; font: inherit; font-weight: 700; font-size: 16px;
+    padding: 12px; cursor: pointer;
   }
-  #log-btn {
-    flex: 1; background: #111; color: #fff; border: none;
-    font: inherit; font-weight: 700; font-size: 16px; padding: 12px; cursor: pointer;
-  }
+  .entry-actions button + button { border-left: 2px solid #111; }
+  #photo-btn { background: #fff; color: #111; padding: 12px 16px; }
+  #log-btn { flex: 1; background: #111; color: #fff; }
   /* The attached photo, small, with its way out. A row only when there is one. */
   #photo-row {
     display: none; align-items: center; justify-content: space-between;
     padding: 10px 12px; border-top: 2px solid #111;
   }
   #photo-row.has-photo { display: flex; }
-  #photo-thumb { display: block; width: 44px; height: 44px; object-fit: cover; border: 2px solid #111; }
-  #photo-clear {
-    background: none; border: none; font: inherit; font-size: 18px;
-    line-height: 1; padding: 0 4px; color: #6b6b6b; cursor: pointer;
-  }
+  #photo-thumb { display: block; }
   #error {
     margin-top: 8px; font-size: 14px; font-weight: 700; color: #b3261e; display: none;
     white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.35;
@@ -212,12 +208,17 @@
     background: none; border: 2px solid #111; font: inherit; font-size: 13px;
     font-weight: 700; padding: 4px 8px; cursor: pointer;
   }
-  .pend-del {
+  /* The two × buttons that dismiss something without deleting anything logged:
+     the queued entry, and the photo attached to the box. One rule, so the
+     gesture looks the same wherever it is offered. */
+  .pend-del, #photo-clear {
     background: none; border: none; font: inherit; font-size: 18px;
     line-height: 1; padding: 0 2px; color: #6b6b6b; cursor: pointer;
   }
-  /* A queued photo, drawn at stamp size so a wordless entry still reads as itself. */
-  .pend-thumb { width: 44px; height: 44px; object-fit: cover; border: 2px solid #111; flex-shrink: 0; }
+  /* The photo at stamp size, in the entry box and in the queued row alike —
+     one picture, so one size, and only how each sits in its row differs. */
+  #photo-thumb, .pend-thumb { width: 44px; height: 44px; object-fit: cover; border: 2px solid #111; }
+  .pend-thumb { flex-shrink: 0; }
   #offline-note { margin-top: 8px; font-size: 13px; color: #6b6b6b; display: none; }
 
   /* Items */
@@ -717,9 +718,15 @@ function anthropicContent(prompt, image) {
 function openaiContent(prompt, image) {
   if (!image) return prompt;
   return [
-    { type: "image_url", image_url: { url: "data:" + image.mediaType + ";base64," + image.data } },
+    { type: "image_url", image_url: { url: photoUrl(image) } },
     { type: "text", text: prompt }
   ];
+}
+// A photo put back together: the inverse of the split normalizePhoto does, and
+// the one form both a browser and an OpenAI-shaped wire take it in. Kept split
+// in storage because Anthropic and Gemini want the halves named separately.
+function photoUrl(image) {
+  return "data:" + image.mediaType + ";base64," + image.data;
 }
 
 // OpenAI-compatible chat/completions shape, shared by DeepSeek and Kimi.
@@ -1017,8 +1024,9 @@ var PARSE_PROMPT = PARSE_RULES + '\nNow do the same for this input: ';
 
 // What changes when the input is a photograph. The schema does not: the same
 // array comes back, so everything downstream of the answer never learns how
-// the food was described.
-var PHOTO_RULES = [
+// the food was described. The closing line rides in the array with the rules it
+// closes, so the photo tail — like the typed one above — is written once.
+var PHOTO_PROMPT = PARSE_RULES + '\n' + [
   'A photo of the food is attached. Then:',
   '- The photo is the input. Give every distinct food visible its own row, exactly as if it',
   '  had been typed, and ignore plates, cutlery and everything else inedible.',
@@ -1029,11 +1037,14 @@ var PHOTO_RULES = [
   '  read off the image.',
   '- The certainty rules apply unchanged, judged on what the photo pins down: counted pieces',
   '  (eggs, slices) can be "high"; a poured or heaped portion is a guessed portion; food',
-  '  hidden in a bowl or under a sauce ranges wide — say so with "low".'
+  '  hidden in a bowl or under a sauce ranges wide — say so with "low".',
+  '',
+  'Now do the same for the food in this photo.'
 ].join("\n");
 
-var PHOTO_PROMPT = PARSE_RULES + '\n' + PHOTO_RULES + '\n\nNow do the same for the food in this photo.';
-var PHOTO_TEXT_PROMPT = PARSE_RULES + '\n' + PHOTO_RULES + '\n\nNow do the same for the food in this photo. The user adds: ';
+// The caption case is the photo case with the typed line named at the end, so it
+// extends that prompt rather than assembling a second copy of it.
+var PHOTO_TEXT_PROMPT = PHOTO_PROMPT + ' The user adds: ';
 
 // Every failure says how it should be retried, decided here where the cause is
 // actually known rather than re-derived later from a status code:
@@ -1818,6 +1829,11 @@ function editRow(it) {
   return li;
 }
 
+// What an entry goes by on screen. A photo logged without a word still has to
+// be called something, and the row and the button that discards it have to call
+// it the same thing — so they ask here rather than each deciding.
+function entryLabel(e) { return e.text || "Photo"; }
+
 // Pending entries live outside the day totals: their protein is unknown until
 // parsed, so counting them would make the headline number lie. They are listed
 // separately, and carry their own date because an entry queued last night must
@@ -1831,7 +1847,7 @@ function renderPending() {
 
   q.forEach(function (e) {
     var left = el("div", "pend-left");
-    left.appendChild(el("div", "pend-text", e.text || "Photo"));
+    left.appendChild(el("div", "pend-text", entryLabel(e)));
     left.appendChild(el("div", "pend-meta", pendingStatus(e)));
 
     var right = el("div", "pend-right");
@@ -1841,13 +1857,13 @@ function renderPending() {
       retry.addEventListener("click", function () { retryPending(e.id); });
       right.appendChild(retry);
     }
-    right.appendChild(delButton("pend-del", "Discard " + (e.text || "photo"), function () { dropPending(e.id); }));
+    right.appendChild(delButton("pend-del", "Discard " + entryLabel(e), function () { dropPending(e.id); }));
 
     var li = el("li", e.parked ? "failed" : "");
     if (e.image) {
       var thumb = el("img", "pend-thumb");
       thumb.alt = "";
-      thumb.src = "data:" + e.image.mediaType + ";base64," + e.image.data;
+      thumb.src = photoUrl(e.image);
       li.appendChild(thumb);
     }
     li.appendChild(left);
@@ -1931,8 +1947,7 @@ var pendingPhoto = null;
 function setPhoto(img) {
   pendingPhoto = img || null;
   photoRow.classList.toggle("has-photo", !!pendingPhoto);
-  photoThumb.src = pendingPhoto
-    ? "data:" + pendingPhoto.mediaType + ";base64," + pendingPhoto.data : "";
+  photoThumb.src = pendingPhoto ? photoUrl(pendingPhoto) : "";
 }
 
 // A phone photo is measured in megabytes and the models read food fine at a

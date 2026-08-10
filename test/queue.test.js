@@ -218,9 +218,10 @@ function check(name, cond, extra) {
 }
 
 const baseStore = () => ({ "protein.apiKey": "sk-test", "protein.provider": "anthropic" });
-// The same for the one provider the reasoning tests need, since a key lives
+// The same for the other two providers the tests reach for, since a key lives
 // under a per-provider name once the provider is not the default.
 const dsStore = () => ({ "protein.provider": "deepseek", "protein.apiKey.deepseek": "sk-ds" });
+const geminiStore = () => ({ "protein.provider": "gemini", "protein.apiKey.gemini": "AIza-test" });
 
 (async () => {
   // ---- 1. happy path: enqueue -> drain -> lands in days, queue empty
@@ -993,7 +994,7 @@ const dsStore = () => ({ "protein.provider": "deepseek", "protein.apiKey.deepsee
     console.log("30. gemini streaming");
     let sentUrl = "";
     const h = makeHarness({
-      store: { "protein.provider": "gemini", "protein.apiKey.gemini": "AIza-test" },
+      store: geminiStore(),
       fetchImpl: async (url) => {
         sentUrl = url;
         return sse([
@@ -1437,11 +1438,9 @@ const dsStore = () => ({ "protein.provider": "deepseek", "protein.apiKey.deepsee
     h.els["log-btn"].click();
     await settle();
     check("logged with nothing typed", q(h).length === 1, q(h));
-    const li = h.els["pending"].children[0];
-    const thumb = li.children.find((c) => c.className === "pend-thumb");
+    const thumb = descendants(h.els["pending"].children[0]).find((c) => c.className === "pend-thumb");
     check("thumbnail drawn from the entry", !!thumb && thumb.src === "data:image/jpeg;base64,BBBB", thumb && thumb.src);
-    const text = li.children.find((c) => c.className === "pend-left").children[0];
-    check("wordless entry still reads as itself", text.textContent === "Photo", text.textContent);
+    check("wordless entry still reads as itself", pendPart(h, "pend-text")[0] === "Photo", pendPart(h, "pend-text"));
     check("estimating like any other", /estimating…/.test(pendMeta(h)[0]), pendMeta(h));
     check("photo-only prompt, nothing appended", sentBody.messages[0].content[1].text === h.ctx.PHOTO_PROMPT, sentBody.messages[0].content[1]);
     g.release();
@@ -1474,7 +1473,7 @@ const dsStore = () => ({ "protein.provider": "deepseek", "protein.apiKey.deepsee
     const gItem = gDelta('[{"name":"Reis","amount":"~200 g","protein_g":5,"certainty":"medium","calories_kcal":260,"calorie_certainty":"medium"}]');
     let gBody = null;
     const g1 = makeHarness({
-      store: { "protein.provider": "gemini", "protein.apiKey.gemini": "AIza-test" },
+      store: geminiStore(),
       fetchImpl: async (url, init) => { gBody = JSON.parse(init.body); return sse([gItem]); },
     });
     g1.ctx.setPhoto(img);
@@ -1485,20 +1484,16 @@ const dsStore = () => ({ "protein.provider": "deepseek", "protein.apiKey.deepsee
       parts.length === 2 && parts[0].inline_data.mime_type === "image/jpeg" &&
       parts[0].inline_data.data === "CCCC" && parts[1].text === g1.ctx.PHOTO_PROMPT, parts);
 
-    let g2Body = null;
-    const g2 = makeHarness({
-      store: { "protein.provider": "gemini", "protein.apiKey.gemini": "AIza-test" },
-      fetchImpl: async (url, init) => { g2Body = JSON.parse(init.body); return sse([gItem]); },
-    });
-    g2.els["food-input"].value = "reis";
-    g2.els["log-btn"].click();
+    // The same harness again with nothing attached: the one part it always sent.
+    g1.els["food-input"].value = "reis";
+    g1.els["log-btn"].click();
     await settle();
     check("gemini: text alone keeps its one part",
-      g2Body.contents[0].parts.length === 1 && "text" in g2Body.contents[0].parts[0], g2Body.contents[0].parts);
+      gBody.contents[0].parts.length === 1 && "text" in gBody.contents[0].parts[0], gBody.contents[0].parts);
 
     let dBody = null;
     const d = makeHarness({
-      store: { "protein.provider": "deepseek", "protein.apiKey.deepseek": "sk-ds" },
+      store: dsStore(),
       fetchImpl: async (url, init) => {
         dBody = JSON.parse(init.body);
         return sse([oDelta('[{"name":"Toast","amount":"1 slice","protein_g":4,"certainty":"high","calories_kcal":90,"calorie_certainty":"medium"}]'), "data: [DONE]\n\n"]);

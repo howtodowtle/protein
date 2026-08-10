@@ -1834,6 +1834,24 @@ function editRow(it) {
 // it the same thing — so they ask here rather than each deciding.
 function entryLabel(e) { return e.text || "Photo"; }
 
+// entry id -> the thumbnail drawn for it. The row around it is cheap to
+// rebuild and gets rebuilt constantly — once per item the stream finishes —
+// but the picture inside it is a JPEG that has to be decoded again every time
+// it is built from scratch. So it is built once and moved, the way an open
+// editor row is (see render), and let go of where the entry is (see
+// removeEntry). In memory only, like the send flags: it is a drawing of the
+// entry, never a second copy of it.
+var thumbNodes = {};
+function entryThumb(e) {
+  var t = thumbNodes[e.id];
+  if (!t) {
+    t = thumbNodes[e.id] = el("img", "pend-thumb");
+    t.alt = "";
+    t.src = photoUrl(e.image);
+  }
+  return t;
+}
+
 // Pending entries live outside the day totals: their protein is unknown until
 // parsed, so counting them would make the headline number lie. They are listed
 // separately, and carry their own date because an entry queued last night must
@@ -1860,12 +1878,7 @@ function renderPending() {
     right.appendChild(delButton("pend-del", "Discard " + entryLabel(e), function () { dropPending(e.id); }));
 
     var li = el("li", e.parked ? "failed" : "");
-    if (e.image) {
-      var thumb = el("img", "pend-thumb");
-      thumb.alt = "";
-      thumb.src = photoUrl(e.image);
-      li.appendChild(thumb);
-    }
+    if (e.image) li.appendChild(entryThumb(e));
     li.appendChild(left);
     li.appendChild(right);
     pendingEl.appendChild(li);
@@ -1943,8 +1956,16 @@ function updateItem(id, fields) {
 // {mediaType, data} with the base64 kept bare — each provider dresses it in
 // its own wire format. Null when there is none.
 var pendingPhoto = null;
+// Which photo the box is waiting for. Shrinking one takes long enough that the
+// box can move on while it happens — the × can clear it, Log it can take the
+// entry, a second photo can be picked — and each of those is this number
+// moving. A shrink that finishes into a number that has moved is one nobody is
+// waiting for any more, so it is dropped rather than attaching itself to
+// whatever the box holds by then.
+var photoSeq = 0;
 
 function setPhoto(img) {
+  photoSeq++;
   pendingPhoto = img || null;
   photoRow.classList.toggle("has-photo", !!pendingPhoto);
   photoThumb.src = pendingPhoto ? photoUrl(pendingPhoto) : "";
@@ -1957,7 +1978,19 @@ function setPhoto(img) {
 // kept in EXIF is baked into the pixels by the draw. The type is read back off
 // the data URL rather than assumed: a browser that cannot write JPEG answers
 // with PNG, and the wire should carry what is actually there.
-var PHOTO_EDGE = 1024, PHOTO_QUALITY = 0.8;
+//
+// How big the result may be, and the settings it tries in order to get there.
+// The first is the one nearly every photo uses: a plate at 1024px lands around
+// 110 KB, nowhere near the ceiling. The rest are for the two that overshoot —
+// a busy frame, where JPEG has more detail to keep than it can, and the PNG a
+// browser without a JPEG encoder falls back to, which ignores quality entirely
+// and can only be shrunk by drawing it smaller. Sized so several photos can
+// wait in the queue inside a ~5 MB origin without crowding out the day log,
+// and so no provider's own image ceiling is ever what stops an entry. The last
+// setting is taken whether or not it fits: a photo too stubborn for all four is
+// still better sent than refused.
+var PHOTO_MAX = 400000;
+var PHOTO_STEPS = [[1024, 0.8], [1024, 0.6], [768, 0.5], [512, 0.4]];
 function normalizePhoto(file) {
   return new Promise(function (resolve, reject) {
     var url = URL.createObjectURL(file);
@@ -1965,20 +1998,32 @@ function normalizePhoto(file) {
     img.onload = function () {
       URL.revokeObjectURL(url);
       try {
-        var scale = Math.min(1, PHOTO_EDGE / Math.max(img.naturalWidth, img.naturalHeight));
-        var canvas = document.createElement("canvas");
-        canvas.width = Math.round(img.naturalWidth * scale);
-        canvas.height = Math.round(img.naturalHeight * scale);
-        canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
-        var dataUrl = canvas.toDataURL("image/jpeg", PHOTO_QUALITY);
-        var m = /^data:([^;]+);base64,/.exec(dataUrl);
-        if (!m) return reject(new Error("unencodable image"));
-        resolve({ mediaType: m[1], data: dataUrl.slice(m[0].length) });
+        var out = null;
+        for (var i = 0; i < PHOTO_STEPS.length; i++) {
+          out = encodePhoto(img, PHOTO_STEPS[i][0], PHOTO_STEPS[i][1]);
+          if (!out) return reject(new Error("unencodable image"));
+          if (out.data.length <= PHOTO_MAX) break;
+        }
+        resolve(out);
       } catch (err) { reject(err); }
     };
     img.onerror = function () { URL.revokeObjectURL(url); reject(new Error("undecodable image")); };
     img.src = url;
   });
+}
+
+// One draw at one size, encoded once. Null when what came back is not a base64
+// data URL at all — which is also how an image with no pixels to draw arrives,
+// since a canvas with a zero side encodes to nothing worth sending.
+function encodePhoto(img, edge, quality) {
+  var scale = Math.min(1, edge / Math.max(img.naturalWidth, img.naturalHeight));
+  var canvas = document.createElement("canvas");
+  canvas.width = Math.round(img.naturalWidth * scale);
+  canvas.height = Math.round(img.naturalHeight * scale);
+  canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
+  var dataUrl = canvas.toDataURL("image/jpeg", quality);
+  var m = /^data:([^;]+);base64,/.exec(dataUrl);
+  return m ? { mediaType: m[1], data: dataUrl.slice(m[0].length) } : null;
 }
 
 // Enqueue first, then try to send. Not "send, and queue on failure" — this way
@@ -2039,6 +2084,7 @@ function removeEntry(id) {
     return q.filter(function (e) { return e.id !== id; });
   });
   delete cooling[id];
+  delete thumbNodes[id];
 }
 
 function dropPending(id) {
@@ -2270,8 +2316,16 @@ photoInput.addEventListener("change", function () {
   // Cleared at once, so picking the same photo again still fires a change.
   photoInput.value = "";
   if (!f) return;
-  normalizePhoto(f).then(setPhoto, function () {
-    showError("Couldn't read that photo — try a different one.");
+  // Picking is itself the box moving on, so it claims the next number rather
+  // than reading the current one: two photos picked in a hurry would otherwise
+  // hold the same claim, and whichever finished first would win. If the box
+  // moves again before this one is ready, it is no longer the answer to
+  // anything — see photoSeq.
+  var seq = ++photoSeq;
+  normalizePhoto(f).then(function (img) {
+    if (seq === photoSeq) setPhoto(img);
+  }, function () {
+    if (seq === photoSeq) showError("Couldn't read that photo — try a different one.");
   });
 });
 photoClear.addEventListener("click", function () { setPhoto(null); });

@@ -1506,6 +1506,94 @@ const geminiStore = () => ({ "protein.provider": "gemini", "protein.apiKey.gemin
     check("openai-compatible: a data URL", dc[0].image_url.url === "data:image/jpeg;base64,CCCC" && dc[1].type === "text", dc);
   }
 
+  // ---- 51. shrinking a photo takes long enough for the box to move on, and
+  //          what it moved on to wins: a photo that lands late must not undo
+  //          the × that dismissed it, nor ride along on the next entry.
+  {
+    console.log("51. a photo that arrives late");
+    const img = { mediaType: "image/jpeg", data: "DDDD" };
+    // The picker, driven the way a phone drives it, with the shrinking held
+    // open so the test can act while it is still going.
+    const pick = (h) => {
+      let done;
+      h.ctx.normalizePhoto = () => new Promise((r) => { done = r; });
+      h.els["photo-input"].files = [{}];
+      h.els["photo-input"].listeners.change[0]();
+      return () => done(img);
+    };
+
+    const cleared = makeHarness({ store: baseStore(), fetchImpl: async () => ok([]) });
+    const finish = pick(cleared);
+    cleared.els["photo-clear"].click();
+    finish();
+    await settle();
+    check("the × holds against a late photo", cleared.ctx.pendingPhoto === null, cleared.ctx.pendingPhoto);
+
+    // The same race against Log it: the entry goes without the photo, and the
+    // photo must not then attach itself to whatever is typed next.
+    let sentBody = null;
+    const logged = makeHarness({
+      store: baseStore(),
+      fetchImpl: async (url, init) => { sentBody = JSON.parse(init.body); return ok([{ name: "Eggs", amount: "4", protein_g: 25 }]); },
+    });
+    const finishLogged = pick(logged);
+    logged.els["food-input"].value = "4 eggs";
+    logged.els["log-btn"].click();
+    finishLogged();
+    await settle();
+    check("the entry went as typed", typeof sentBody.messages[0].content === "string", sentBody.messages[0].content);
+    check("and the late photo did not stay behind", logged.ctx.pendingPhoto === null, logged.ctx.pendingPhoto);
+
+    // Two picked in a hurry: the one picked last is the one meant, whichever
+    // order the two finish shrinking in — so both orders are asked for. The
+    // one that finishes first is the interesting one, since a claim staked by
+    // reading the counter rather than advancing it would let it win.
+    for (const firstDone of [true, false]) {
+      const raced = makeHarness({ store: baseStore(), fetchImpl: async () => ok([]) });
+      const holds = [];
+      raced.ctx.normalizePhoto = () => new Promise((r) => holds.push(r));
+      raced.els["photo-input"].files = [{}];
+      raced.els["photo-input"].listeners.change[0]();
+      raced.els["photo-input"].listeners.change[0]();
+      const done = [
+        () => holds[0]({ mediaType: "image/jpeg", data: "FIRST" }),
+        () => holds[1]({ mediaType: "image/jpeg", data: "SECOND" }),
+      ];
+      if (!firstDone) done.reverse();
+      done.forEach((f) => f());
+      await settle();
+      check("the photo picked last is the one held, " + (firstDone ? "in pick order" : "out of order"),
+        raced.ctx.pendingPhoto && raced.ctx.pendingPhoto.data === "SECOND", raced.ctx.pendingPhoto);
+    }
+  }
+
+  // ---- 52. the thumbnail is built once and moved, not decoded again on every
+  //          redraw the streaming preview asks for
+  {
+    console.log("52. one thumbnail per queued photo");
+    const g = gate();
+    const h = makeHarness({
+      store: baseStore(),
+      fetchImpl: async (url, init) => sse([
+        aDelta('[{"name":"Pasta","amount":"~250 g","protein_g":9,"certainty":"medium","calories_kcal":400,"calorie_certainty":"medium"},'),
+        () => g.held,
+        aDelta('{"name":"Sauce","amount":"~80 g","protein_g":2,"certainty":"low","calories_kcal":90,"calorie_certainty":"low"}]'),
+      ], init.signal),
+    });
+    h.ctx.setPhoto({ mediaType: "image/jpeg", data: "EEEE" });
+    h.els["log-btn"].click();
+    await settle();
+    const thumbOf = () => descendants(h.els["pending"].children[0]).find((c) => c.className === "pend-thumb");
+    const first = thumbOf();
+    check("drawn while estimating", !!first && first.src === "data:image/jpeg;base64,EEEE", first && first.src);
+    h.ctx.renderPending();
+    h.ctx.render();
+    check("the same node survives a redraw", thumbOf() === first, thumbOf() === first);
+    g.release();
+    await settle();
+    check("and is let go of with the entry", Object.keys(h.ctx.thumbNodes).length === 0, h.ctx.thumbNodes);
+  }
+
   console.log("\n" + pass + " passed, " + fail + " failed");
   process.exit(fail ? 1 : 0);
 })();

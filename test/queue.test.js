@@ -1374,11 +1374,15 @@ const dsStore = () => ({ "protein.provider": "deepseek", "protein.apiKey.deepsee
     // the exact shape of the bug this file is mostly about.
     const gemOffWithEffort = await sentFor(
       { ...gemStore, "protein.thinking.gemini": "off", "protein.effort.gemini": "high" }, gDelta);
-    check("thinking on gets room to think", on.max_tokens === 8000, on.max_tokens);
-    check("so does the provider default", byDefault.max_tokens === 8000, byDefault.max_tokens);
+    check("thinking on gets room to think", on.max_tokens === 16000, on.max_tokens);
+    // The budget and the model it is asked of have to move together: the older
+    // deepseek-chat caps max_tokens at 8k, so a default that drifted back to it
+    // would 400 on every request the moment thinking was anything but off.
+    check("and asks it of a model that can take it", on.model === "deepseek-v4-flash", on.model);
+    check("so does the provider default", byDefault.max_tokens === 16000, byDefault.max_tokens);
     check("thinking off gets room to answer", off.max_tokens === 2000, off.max_tokens);
     check("and gemini says the same in its own words",
-      gem.generationConfig.maxOutputTokens === 8000, gem.generationConfig);
+      gem.generationConfig.maxOutputTokens === 16000, gem.generationConfig);
     check("an effort cannot turn thinking back on",
       gemOffWithEffort.generationConfig.thinkingConfig.thinkingBudget === 0,
       gemOffWithEffort.generationConfig);

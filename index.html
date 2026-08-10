@@ -507,11 +507,15 @@
 // Bounded from both sides, which leaves one number rather than one per
 // provider: it has to clear what the thinking actually costs, and 4000 did not
 // (a model spent every one of them deliberating and had none left to answer
-// with), and it has to fit under the lowest output ceiling of the four, which is
-// DeepSeek's 8192. Nothing is charged for room left unused, but nothing is
-// bought by it either — a meal is one short array, so the only thing a bigger
-// number could buy is a model talking to itself for longer before it fails.
-var THINKING_BUDGET = 8000;
+// with), and it has to stay under the lowest output ceiling of the models this
+// app actually asks for — 64k on deepseek-reasoner, Claude and Gemini, 384k on
+// the DeepSeek V4 pair, and a quarter of a million on current Kimi. Nothing is
+// charged for room left unused, so the number leans generous: a meal is one
+// short array, and the only thing this ceiling should ever stop is a model that
+// has lost the thread entirely, which the whole-request clock ends anyway.
+// The one model it would not fit is deepseek-chat, which caps max_tokens at 8k —
+// see the model default below, which is why it is no longer the one asked for.
+var THINKING_BUDGET = 16000;
 // Thinking off: the array is all that is coming. Seven items at six fields each is
 // ~400 tokens, so the 500 this replaces was one long dinner from cutting itself off.
 var ANSWER_BUDGET = 2000;
@@ -587,7 +591,11 @@ var PROVIDERS = {
   deepseek: {
     label: "DeepSeek",
     host: "api.deepseek.com",
-    model: "deepseek-chat",
+    // deepseek-chat is the older model and caps max_tokens at 8k, which is under
+    // the budget a thinking model needs — asking for it would 400 every request
+    // the moment thinking is anything but off. A model you set yourself still
+    // wins over this; only a provider nobody has configured lands here.
+    model: "deepseek-v4-flash",
     keyHint: "sk-…",
     efforts: ["high", "max"],
     effortNote: "reasoning_effort — only high and max are distinct (low/medium map to high, xhigh to max).",

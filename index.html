@@ -490,7 +490,7 @@
 
 // ---------- providers ----------
 // Each provider maps the same request/response contract onto its own wire format.
-// opts = { thinking: "" | "on" | "off", effort: "" | <any string>, budget: int }.
+// opts = { thinking: "" | "on" | "off", effort: "" | <any string> }.
 // "" means send nothing and let the provider apply its own default. Values are
 // passed through verbatim — no whitelist here, so new API values keep working.
 // request() takes stream as its last argument and asks for SSE when it is set;
@@ -502,20 +502,26 @@
 
 // Room for the answer and — where the provider charges thinking against the same
 // ceiling, which every reasoning model here does — for the thinking that comes
-// first. A cap is not a spend: nothing is charged for room left unused, so the
-// only cost of a generous number is a provider refusing one bigger than its model
-// can emit. That is why this is four numbers and not one. One number for everybody
-// was the bug: a model spent all 4000 of them thinking and had none left to answer
-// with, and the answer came back empty with nothing to say it had been cut off.
-var THINKING_BUDGET = {
-  anthropic: 16000,   // short of the ceiling on purpose: the no-stream path is still live
-  deepseek: 8000,
-  kimi: 8000,
-  gemini: 32000
-};
+// first. Bounded from both sides, which leaves one number rather than one per
+// provider: it has to clear what the thinking actually costs, and 4000 did not
+// (a model spent every one of them deliberating and had none left to answer
+// with), and it has to fit under the lowest output ceiling of the four, which is
+// DeepSeek's 8192. Nothing is charged for room left unused, but nothing is
+// bought by it either — a meal is one short array, so the only thing a bigger
+// number could buy is a model talking to itself for longer before it fails.
+var THINKING_BUDGET = 8000;
 // Thinking off: the array is all that is coming. Seven items at six fields each is
 // ~400 tokens, so the 500 this replaces was one long dinner from cutting itself off.
 var ANSWER_BUDGET = 2000;
+
+// Only an explicit "off" is known not to think. A provider default is whatever
+// the model does unprompted, and on a reasoning model that is thinking — so the
+// default gets the room too, rather than the answer-sized cap it used to. Asked
+// in one place because two wire formats spell the field differently and would
+// otherwise be two ternaries that have to agree.
+function maxTokens(opts) {
+  return opts.thinking === "off" ? ANSWER_BUDGET : THINKING_BUDGET;
+}
 
 // The messages-shaped body Anthropic and the OpenAI-compatible providers agree on.
 // Only the "thinking on" type string and where effort lands actually differ, so
@@ -523,10 +529,7 @@ var ANSWER_BUDGET = 2000;
 function chatBody(model, prompt, opts, stream) {
   var body = {
     model: model,
-    // Only an explicit "off" is known not to think. A provider default is whatever
-    // the model does unprompted, and on a reasoning model that is thinking — so
-    // the default gets the room too, rather than the answer-sized cap it used to.
-    max_tokens: opts.thinking === "off" ? ANSWER_BUDGET : opts.budget,
+    max_tokens: maxTokens(opts),
     messages: [{ role: "user", content: prompt }]
   };
   if (opts.thinking === "off") body.thinking = { type: "disabled" };
@@ -619,7 +622,7 @@ var PROVIDERS = {
     request: function (key, model, prompt, opts, stream) {
       var cfg = {
         responseMimeType: "application/json",
-        maxOutputTokens: opts.thinking === "off" ? ANSWER_BUDGET : opts.budget
+        maxOutputTokens: maxTokens(opts)
       };
       // thinkingBudget: 0 disables, -1 lets the model decide.
       if (opts.thinking === "off") cfg.thinkingConfig = { thinkingBudget: 0 };
@@ -744,9 +747,7 @@ function optsFor(id) {
   id = id || provider();
   return {
     thinking: localStorage.getItem(storageKey("thinking", id)) || "",
-    effort: (localStorage.getItem(storageKey("effort", id)) || "").trim(),
-    // Not a setting anybody types, but resolved from the provider like one.
-    budget: THINKING_BUDGET[id]
+    effort: (localStorage.getItem(storageKey("effort", id)) || "").trim()
   };
 }
 
@@ -944,6 +945,8 @@ var PARSE_PROMPT = [
 //   "soft"     — worth another go later; burns an attempt.
 //   "terminal" — the provider understood us and said no; retrying asks the same
 //                question and gets the same answer.
+//   "downgrade" — terminal as it stands, but there is one setting left to change,
+//                so it is worth asking again with that changed. See cutOffError.
 function apiError(msg, retry) {
   var err = new Error(msg);
   err.retry = retry;
@@ -970,17 +973,16 @@ var THINKING_FIELD = /"(reasoning_content|reasoning|thinking|thought)"\s*:/;
 // spends it the same way, so asking again unchanged only re-buys the thinking
 // that overran. Terminal, therefore, unless there is something to change: when
 // the model was allowed to think, the thinking is the thing that spent the room,
-// and turning it off for one try is worth more than parking. That is what
-// downgrade asks the queue for — and what the retry line answers with, so this
-// says what happened and leaves what happens next to the row.
-function cutOffError(p, clean, opts) {
-  var thought = opts.thinking !== "off";
-  var err = apiError(p.host + (clean
+// and turning it off for one try is worth more than parking. Which of the two it
+// is, is settled here, where the options the request went out with are known —
+// on the try without thinking, thought is already false and the class is already
+// terminal, so the once-only rule needs saying nowhere else. What happens next is
+// the row's to say, so the words here stop at what happened.
+function cutOffError(p, clean, thought) {
+  return apiError(p.host + (clean
       ? " ran out of room mid-answer."
       : " spent its whole token budget thinking and never answered.") +
-    (thought ? "" : " Log fewer foods at once."), "terminal");
-  err.downgrade = thought;
-  return err;
+    (thought ? "" : " Log fewer foods at once."), thought ? "downgrade" : "terminal");
 }
 
 // A request nobody cuts off can stay open for as long as the phone lets it, and
@@ -1065,7 +1067,7 @@ async function readStreamText(res, delta, truncated, onText, kick) {
     // Why it stopped rides in the last chunk, behind the text it cut short.
     // Remembered, not acted on: this reads a stream to its end, and what a
     // stopped answer is worth is the caller's question.
-    if (truncated && truncated(chunk)) cut = true;
+    if (truncated(chunk)) cut = true;
     var piece = delta(chunk);
     if (piece) { acc += piece; onText(acc); }
   }
@@ -1089,6 +1091,14 @@ async function readBody(res) {
   try { b.text = await res.text(); } catch (e) {}
   try { b.json = JSON.parse(b.text); } catch (e) {}
   return b;
+}
+
+// The two readings a whole answer carries, taken together because they are only
+// ever wanted together: what it said, and whether it had finished saying it. Two
+// routes end up here — the plain one, and a provider that ignored the stream flag
+// and sent one body anyway — and they are the same read, so they are one function.
+function readWhole(p, json) {
+  return { raw: json ? p.extract(json) : "", cut: !!json && p.truncated(json) };
 }
 
 // The model's wire items, filtered and mapped into ours — one function for
@@ -1125,8 +1135,8 @@ function modelItems(arr) {
 async function parseFood(text, onItems, noThink) {
   var id = provider();
   var p = PROVIDERS[id];
-  var opts = noThink ? { thinking: "off", effort: "", budget: THINKING_BUDGET[id] }
-                     : optsFor(id);
+  var opts = optsFor(id);
+  if (noThink) { opts.thinking = "off"; opts.effort = ""; }
   // Streaming is asked for only when this browser can actually read a stream —
   // the flag changes what the server sends back, so it is never requested on
   // faith and left unreadable — only from a provider that brought a delta() to
@@ -1201,7 +1211,8 @@ async function parseFood(text, onItems, noThink) {
 
     // fullText: the text path's body, kept for its errors.
     // cut: the provider said it stopped for room, not because it was finished.
-    var raw, fullText = "", cut = false;
+    // read: whichever of the two whole-body routes ran, if either did.
+    var raw, fullText = "", cut = false, read;
     if (wantStream && res.body && res.body.getReader) {
       // The preview: objects completed so far are cut from the growing text
       // and mapped exactly as the commit below will map them — but only once
@@ -1236,10 +1247,11 @@ async function parseFood(text, onItems, noThink) {
         // still one we paid for — read it the way the text path would, which
         // means asking it why it stopped as well as what it said.
         fullText = out.body;
-        var whole = null;
-        try { whole = JSON.parse(out.body); } catch (e) {}
-        raw = whole ? p.extract(whole) : "";
-        if (whole && p.truncated) cut = p.truncated(whole);
+        var parsed = null;
+        try { parsed = JSON.parse(out.body); } catch (e) {}
+        read = readWhole(p, parsed);
+        raw = read.raw;
+        cut = read.cut;
       }
     } else {
       // No readable stream — an old browser, or a response with no body to
@@ -1248,8 +1260,9 @@ async function parseFood(text, onItems, noThink) {
       var plain = await readBody(res);
       if (timedOut) throw timeoutErr();
       fullText = plain.text;
-      raw = p.extract(plain.json || {});
-      cut = !!p.truncated && p.truncated(plain.json || {});
+      read = readWhole(p, plain.json);
+      raw = read.raw;
+      cut = read.cut;
     }
 
     var clean = raw.replace(/```json|```/g, "").trim();
@@ -1264,7 +1277,7 @@ async function parseFood(text, onItems, noThink) {
       // ceiling is not what to do about a ramble. Asked only once the text has
       // failed to parse, so an answer that arrived whole despite a truncation
       // flag is still an answer.
-      if (cut) throw cutOffError(p, clean, opts);
+      if (cut) throw cutOffError(p, clean, opts.thinking !== "off");
       if (!clean && THINKING_FIELD.test(fullText)) {
         throw apiError(p.host + " returned its reasoning and no answer.", "soft");
       }
@@ -1885,10 +1898,12 @@ function preconnect() {
 // for that — beyond it we would only be queueing at the provider instead.
 var MAX_INFLIGHT = 3;
 // What a failure worth repeating waits before the next try, one step per retry.
-// The list is therefore also how many tries an entry gets: when the steps run
-// out it parks and waits for you. The point of retrying at all is that it
-// happens without you — before this the only triggers were things you did, so a
-// rate limit at breakfast sat there until you next opened the app.
+// The list is therefore also how many tries an entry gets — with one exception,
+// the downgrade below, which earns a try the steps did not budget for and so
+// takes the last step twice. When they run out it parks and waits for you. The
+// point of retrying at all is that it happens without you — before this the only
+// triggers were things you did, so a rate limit at breakfast sat there until you
+// next opened the app.
 var RETRY_MS = [2000, 8000];
 var MAX_ATTEMPTS = RETRY_MS.length + 1;
 // A request that never reached the provider says nothing about the entry and
@@ -2016,13 +2031,12 @@ async function send(e) {
     }
 
     var attempts = (e.attempts || 0) + 1;
-    // A downgrade overrides the parking its terminal failure would otherwise get:
-    // there is one thing left to change, so there is one try left worth making.
-    // The flag rides on the entry, so it survives a reload and the request that
-    // follows goes out without reasoning. Once only — e.noThink already set means
-    // the try without thinking is the one that just ran out of room, and no wait
-    // shortens an answer.
-    var downgrade = failure.downgrade && !e.noThink;
+    // A downgrade is a terminal failure with one thing left to change, so it is
+    // the one that does not park. The flag rides on the entry, so it survives a
+    // reload and the request that follows goes out without reasoning. Set rather
+    // than assigned, because a downgraded try that then fails softly must keep
+    // going out downgraded.
+    var downgrade = failure.retry === "downgrade";
     var parked = !downgrade && (failure.retry === "terminal" || attempts >= MAX_ATTEMPTS);
     var patch = { attempts: attempts, error: msg, parked: parked };
     if (downgrade) patch.noThink = true;

@@ -137,11 +137,19 @@ const abortsWith = (signal) => new Promise((_, reject) => {
     const e = new Error("aborted"); e.name = "AbortError"; reject(e);
   });
 });
-// One provider chunk carrying `text`, framed as the SSE line it arrives on —
-// one builder per wire format the app claims to speak.
-const aDelta = (text) => "data: " + JSON.stringify({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text } }) + "\n\n";
-const gDelta = (text) => "data: " + JSON.stringify({ candidates: [{ content: { parts: [{ text }] } }] }) + "\n\n";
-const oDelta = (content) => "data: " + JSON.stringify({ choices: [{ delta: { content } }] }) + "\n\n";
+// Something the test holds shut and opens when it is ready to: `held` is what
+// the app waits on, `release` is the test letting it through.
+const gate = () => {
+  let release;
+  const held = new Promise((r) => (release = r));
+  return { held, release };
+};
+// The SSE line a chunk arrives on, and one builder per wire format the app
+// claims to speak — each holding nothing but its own shape.
+const frame = (chunk) => "data: " + JSON.stringify(chunk) + "\n\n";
+const aDelta = (text) => frame({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text } });
+const gDelta = (text) => frame({ candidates: [{ content: { parts: [{ text }] } }] });
+const oDelta = (content) => frame({ choices: [{ delta: { content } }] });
 // The status line under each pending entry, top to bottom.
 const pendMeta = (h) => h.els["pending"].children.map((li) => li.children[0].children[1].textContent);
 
@@ -347,15 +355,14 @@ const baseStore = () => ({ "protein.apiKey": "sk-test", "protein.provider": "ant
   // ---- 10. discard while in flight does not resurrect the entry
   {
     console.log("10. discard mid-flight");
-    let release;
-    const gate = new Promise((r) => (release = r));
-    const h = makeHarness({ store: baseStore(), fetchImpl: async () => { await gate; return ok([{ name: "W", amount: "", protein_g: 9 }]); } });
+    const g = gate();
+    const h = makeHarness({ store: baseStore(), fetchImpl: async () => { await g.held; return ok([{ name: "W", amount: "", protein_g: 9 }]); } });
     h.els["food-input"].value = "in flight";
     h.els["log-btn"].click();
     const id = q(h)[0].id;
     h.ctx.dropPending(id);
     check("removed from queue", q(h).length === 0, q(h));
-    release();
+    g.release();
     await settle();
     check("still empty", q(h).length === 0, q(h));
     check("no day entry written", Object.keys(days(h)).length === 0, days(h));
@@ -816,15 +823,14 @@ const baseStore = () => ({ "protein.apiKey": "sk-test", "protein.provider": "ant
   //          still reads in the order things were logged
   {
     console.log("25. fresh entry overtakes an in-flight one");
-    let release;
-    const gate = new Promise((r) => (release = r));
+    const g = gate();
     let started = 0;
     const h = makeHarness({
       store: baseStore(),
       fetchImpl: async (url, init) => {
         started++;
         const slow = /slow/.test(JSON.parse(init.body).messages[0].content);
-        if (slow) await gate;
+        if (slow) await g.held;
         return ok([{ name: slow ? "Slow" : "Fast", amount: "", protein_g: 1 }]);
       },
     });
@@ -837,7 +843,7 @@ const baseStore = () => ({ "protein.apiKey": "sk-test", "protein.provider": "ant
     check("both are in flight at once", started === 2, started);
     check("the fresh one has already landed", Object.values(days(h))[0].length === 1, days(h));
 
-    release();
+    g.release();
     await settle();
     check("both landed", q(h).length === 0 && Object.values(days(h))[0].length === 2, days(h));
     // Answers came back last-first; the day is filed first-first regardless.
@@ -865,8 +871,8 @@ const baseStore = () => ({ "protein.apiKey": "sk-test", "protein.provider": "ant
   //          exactly what a whole answer would have
   {
     console.log("27. streaming with live progress");
-    let release, sentBody = null;
-    const gate = new Promise((r) => (release = r));
+    let sentBody = null;
+    const g = gate();
     const h = makeHarness({
       store: baseStore(),
       fetchImpl: async (url, init) => {
@@ -874,7 +880,7 @@ const baseStore = () => ({ "protein.apiKey": "sk-test", "protein.provider": "ant
         return sse([
           aDelta('[{"name":"Fried eggs","amount":"4 eggs, ~220 g","protein_g":25,"certainty":"high",'),
           aDelta('"calories_kcal":360,"calorie_certainty":"high"},'),
-          () => gate,
+          () => g.held,
           aDelta('{"name":"Bauernbrot","amount":"3 slices, ~135 g","protein_g":10,"certainty":"medium","calories_kcal":340,"calorie_certainty":"medium"}]'),
         ]);
       },
@@ -891,7 +897,7 @@ const baseStore = () => ({ "protein.apiKey": "sk-test", "protein.provider": "ant
     check("preview follows the metric", /Fried eggs 360 kcal/.test(pendMeta(h)[0]), pendMeta(h));
     h.els["metric-protein"].click();
 
-    release();
+    g.release();
     await settle();
     check("committed on completion", q(h).length === 0, q(h));
     const d = Object.values(days(h))[0];
@@ -987,13 +993,12 @@ const baseStore = () => ({ "protein.apiKey": "sk-test", "protein.provider": "ant
   // ---- 32. discarding an entry mid-stream leaves nothing behind
   {
     console.log("32. discard mid-stream");
-    let release;
-    const gate = new Promise((r) => (release = r));
+    const g = gate();
     const h = makeHarness({
       store: baseStore(),
       fetchImpl: async () => sse([
         aDelta('[{"name":"W","amount":"","protein_g":9,"certainty":"high","calories_kcal":50,"calorie_certainty":"high"},'),
-        () => gate,
+        () => g.held,
         aDelta('{"name":"X","amount":"","protein_g":3,"certainty":"high","calories_kcal":20,"calorie_certainty":"high"}]'),
       ]),
     });
@@ -1002,7 +1007,7 @@ const baseStore = () => ({ "protein.apiKey": "sk-test", "protein.provider": "ant
     await settle();
     h.ctx.dropPending(q(h)[0].id);
     check("removed from queue", q(h).length === 0, q(h));
-    release();
+    g.release();
     await settle();
     check("no day entry written", Object.keys(days(h)).length === 0, days(h));
     check("no progress left behind", Object.keys(h.ctx.streamProgress).length === 0, h.ctx.streamProgress);

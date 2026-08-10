@@ -947,13 +947,13 @@ function scanObjects(text) {
 }
 
 // Reads an SSE response to its end and returns the text the model produced.
-// All three providers frame streaming the same way — "data: {json}" lines,
-// blank-line separated — and differ only in where the text sits inside a
-// chunk, which is delta(). kick() is called on every arrival, visible text or
-// not: reasoning deltas and keep-alive pings prove the provider is still
-// there. Deltas are concatenated bare — the "\n" extract() puts between
-// blocks cannot matter for an answer the prompt requires to be one raw JSON
-// array.
+// All four providers frame streaming the same way — "data: {json}" lines,
+// blank-line separated, three wire formats between them — and differ only in
+// where the text sits inside a chunk, which is delta(). kick() is called on
+// every arrival, visible text or not: reasoning deltas and keep-alive pings
+// prove the provider is still there. Deltas are concatenated bare — the "\n"
+// extract() puts between blocks cannot matter for an answer the prompt
+// requires to be one raw JSON array.
 async function readStreamText(res, delta, onText, kick) {
   var reader = res.body.getReader();
   var dec = new TextDecoder();
@@ -967,12 +967,14 @@ async function readStreamText(res, delta, onText, kick) {
     buf = lines.pop(); // an unterminated last line waits for its next chunk
     for (var i = 0; i < lines.length; i++) {
       if (lines[i].slice(0, 5) !== "data:") continue;
-      var payload = lines[i].slice(5).trim(); // trim also drops a CR
-      if (!payload || payload === "[DONE]") continue;
       var chunk = null;
-      try { chunk = JSON.parse(payload); } catch (e) { continue; }
+      // Everything a data: line can hold that is not a chunk — a blank
+      // keep-alive, OpenAI's "[DONE]" farewell, a frame split by a proxy —
+      // falls out here, so no provider's way of saying goodbye needs naming.
+      // JSON.parse eats the leading space and any trailing CR itself.
+      try { chunk = JSON.parse(lines[i].slice(5)); } catch (e) { continue; }
       var piece = delta(chunk);
-      if (piece) { acc += piece; if (onText) onText(acc); }
+      if (piece) { acc += piece; onText(acc); }
     }
   }
   return acc;
@@ -989,15 +991,15 @@ async function readBody(res) {
 }
 
 // The model's wire items, filtered and mapped into ours — one function for
-// the committed items and the streaming preview alike, so a previewed figure
-// is structurally the figure the day would get: same filter, same clamp,
-// same words.
+// the committed items and the streaming preview alike, so a previewed item is
+// structurally the item the day would get: same filter, same clamp, same
+// words. Nothing here is a record yet; what makes one — its identity and its
+// place in the day — is stamped where it is filed.
 function modelItems(arr) {
   return arr
     .filter(function (x) { return x && typeof x.name === "string"; })
     .map(function (x) {
       return {
-        id: newId(),
         name: x.name,
         amount: String(x.amount == null ? "" : x.amount),
         protein: Math.max(0, Math.round(Number(x.protein_g) || 0)),
@@ -1011,16 +1013,17 @@ function modelItems(arr) {
     });
 }
 
-// onItems, when given, is fed the preview while the answer streams: each call
-// gets every item completed so far, put through the same mapping the final
-// answer will get. A report, not a result — the answer this function returns
-// is parsed from the finished text alone.
+// onItems is fed the preview while the answer streams: each call gets every
+// item completed so far, put through the same mapping the final answer will
+// get. A report, not a result — the answer this function returns is parsed
+// from the finished text alone.
 async function parseFood(text, onItems) {
   var id = provider();
   var p = PROVIDERS[id];
-  // Streaming is asked for only when this browser can actually read a stream:
+  // Streaming is asked for only when this browser can actually read a stream —
   // the flag changes what the server sends back, so it is never requested on
-  // faith and left unreadable.
+  // faith and left unreadable — and only from a provider that brought a
+  // delta() to read the chunks with.
   var wantStream = typeof ReadableStream !== "undefined" &&
                    typeof TextDecoder !== "undefined" && !!p.delta;
   var req = p.request(apiKey(id), modelFor(id), PARSE_PROMPT + JSON.stringify(text), optsFor(id), wantStream);
@@ -1083,15 +1086,15 @@ async function parseFood(text, onItems) {
       throw apiError(p.host + " HTTP " + res.status + ": " + msg, soft ? "soft" : "terminal");
     }
 
-    var raw = "", fullText = "";
+    var raw, fullText = ""; // fullText: the text path's body, kept for its errors
     if (wantStream && res.body && res.body.getReader) {
       // The preview: objects completed so far are cut from the growing text
-      // and mapped exactly as the commit below will map them. onItems only
-      // hears when something new actually finished, not on every chunk.
+      // and mapped exactly as the commit below will map them — but only once
+      // one more has actually finished, so most chunks cost a scan and no more.
       var seen = 0;
-      var onText = onItems && function (acc) {
-        var items = modelItems(scanObjects(acc));
-        if (items.length > seen) { seen = items.length; onItems(items); }
+      var onText = function (acc) {
+        var objs = scanObjects(acc);
+        if (objs.length > seen) { seen = objs.length; onItems(modelItems(objs)); }
       };
       try {
         raw = await readStreamText(res, p.delta, onText, function () { arm(STALL_MS); });
@@ -1805,8 +1808,11 @@ function mark(id, patch, retryAt) {
 // in the order things were actually logged — including a retry that lands hours
 // late. Items from before this existed carry no stamp and stay where they are,
 // which is where they were logged.
+// This is also where an item becomes a record and gets the id the rest of the
+// app knows it by: everything upstream is still just the model's answer, and a
+// preview of one is not a thing anybody can edit or delete yet.
 function fileItems(list, items, at) {
-  items.forEach(function (it) { it.at = at; });
+  items.forEach(function (it) { it.at = at; it.id = newId(); });
   var i = list.findIndex(function (x) { return x.at && x.at > at; });
   return i < 0 ? list.concat(items) : list.slice(0, i).concat(items, list.slice(i));
 }

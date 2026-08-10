@@ -176,8 +176,12 @@ const aWhole = (text, extra) => ({
   ok: true, status: 200,
   text: async () => JSON.stringify({ content: [{ type: "text", text }], ...extra }),
 });
-// The status line under each pending entry, top to bottom.
-const pendMeta = (h) => h.els["pending"].children.map((li) => li.children[0].children[1].textContent);
+// One part of each pending entry, top to bottom, asked for by class rather than
+// position — a photo entry grows a thumbnail ahead of the column holding these.
+const pendPart = (h, cls) => h.els["pending"].children.map((li) =>
+  (descendants(li).find((c) => c.className === cls) || {}).textContent);
+// The status line under each pending entry.
+const pendMeta = (h) => pendPart(h, "pend-meta");
 // The first item of the only day, for the tests that log exactly one thing.
 // Empty rather than absent when nothing was written, so a test that expected
 // an item reports the miss instead of throwing and taking the rest with it.
@@ -214,9 +218,10 @@ function check(name, cond, extra) {
 }
 
 const baseStore = () => ({ "protein.apiKey": "sk-test", "protein.provider": "anthropic" });
-// The same for the one provider the reasoning tests need, since a key lives
+// The same for the other two providers the tests reach for, since a key lives
 // under a per-provider name once the provider is not the default.
 const dsStore = () => ({ "protein.provider": "deepseek", "protein.apiKey.deepseek": "sk-ds" });
+const geminiStore = () => ({ "protein.provider": "gemini", "protein.apiKey.gemini": "AIza-test" });
 
 (async () => {
   // ---- 1. happy path: enqueue -> drain -> lands in days, queue empty
@@ -989,7 +994,7 @@ const dsStore = () => ({ "protein.provider": "deepseek", "protein.apiKey.deepsee
     console.log("30. gemini streaming");
     let sentUrl = "";
     const h = makeHarness({
-      store: { "protein.provider": "gemini", "protein.apiKey.gemini": "AIza-test" },
+      store: geminiStore(),
       fetchImpl: async (url) => {
         sentUrl = url;
         return sse([
@@ -1452,6 +1457,213 @@ const dsStore = () => ({ "protein.provider": "deepseek", "protein.apiKey.deepsee
     check("an effort cannot turn thinking back on",
       gemOffWithEffort.generationConfig.thinkingConfig.thinkingBudget === 0,
       gemOffWithEffort.generationConfig);
+  }
+
+  // ---- 49. a photo rides the entry: queued, on the wire, gone once logged
+  {
+    console.log("49. photo + text");
+    const img = { mediaType: "image/jpeg", data: "AAAA" };
+    let sentBody = null;
+    const h = makeHarness({
+      store: baseStore(),
+      fetchImpl: async (url, init) => { sentBody = JSON.parse(init.body); return ok([{ name: "Eggs", amount: "4", protein_g: 25 }]); },
+    });
+    h.ctx.setPhoto(img);
+    check("preview row shown", h.els["photo-row"].classList.contains("has-photo"), h.els["photo-row"].className);
+    h.els["food-input"].value = "with ketchup";
+    h.els["log-btn"].click();
+    check("image queued with the entry", q(h).length === 1 && q(h)[0].image.data === "AAAA", q(h));
+    check("box cleared, photo included", h.ctx.pendingPhoto === null && !h.els["photo-row"].classList.contains("has-photo"), h.ctx.pendingPhoto);
+    await settle();
+    const content = sentBody.messages[0].content;
+    check("image block first, words after", Array.isArray(content) && content[0].source.media_type === "image/jpeg" && content[0].source.data === "AAAA", content);
+    check("photo prompt with the text as caption", content[1].text === h.ctx.PHOTO_TEXT_PROMPT + JSON.stringify("with ketchup"), content[1]);
+    // The caption case is the photo case plus what the caption is for — one
+    // owner for the photo rules, and the extra rule only where it applies.
+    check("it is the photo prompt, extended", content[1].text.indexOf(h.ctx.PHOTO_PROMPT) === 0, content[1].text.slice(0, 40));
+    check("and it says what the words are for", /words sent with it/i.test(content[1].text));
+    check("item landed without the photo", only(h).protein === 25 && !("image" in only(h)), only(h));
+    check("queue drained", q(h).length === 0, q(h));
+  }
+
+  // ---- 50. photo alone is an entry: its own prompt, its own face in the list
+  {
+    console.log("50. photo only");
+    const img = { mediaType: "image/jpeg", data: "BBBB" };
+    const g = gate();
+    let sentBody = null;
+    const h = makeHarness({
+      store: baseStore(),
+      fetchImpl: async (url, init) => {
+        sentBody = JSON.parse(init.body);
+        return sse([
+          () => g.held,
+          aDelta('[{"name":"Pasta","amount":"~250 g","protein_g":9,"certainty":"medium","calories_kcal":400,"calorie_certainty":"medium"}]'),
+        ], init.signal);
+      },
+    });
+    h.ctx.setPhoto(img);
+    h.els["log-btn"].click();
+    await settle();
+    check("logged with nothing typed", q(h).length === 1, q(h));
+    const thumb = descendants(h.els["pending"].children[0]).find((c) => c.className === "pend-thumb");
+    check("thumbnail drawn from the entry", !!thumb && thumb.src === "data:image/jpeg;base64,BBBB", thumb && thumb.src);
+    check("wordless entry still reads as itself", pendPart(h, "pend-text")[0] === "Photo", pendPart(h, "pend-text"));
+    check("estimating like any other", /estimating…/.test(pendMeta(h)[0]), pendMeta(h));
+    const prompt = sentBody.messages[0].content[1].text;
+    check("photo-only prompt, nothing appended", prompt === h.ctx.PHOTO_PROMPT, sentBody.messages[0].content[1]);
+    // The mirror of test 51's "no photo wording": a photo that came alone is
+    // told nothing about words that came with it, because none did.
+    check("no caption wording anywhere in it", !/words sent with it|user adds/i.test(prompt));
+    g.release();
+    await settle();
+    check("committed", only(h).protein === 9, days(h));
+    check("queue drained", q(h).length === 0, q(h));
+  }
+
+  // ---- 51. text alone is the request it always was — the photo left no trace
+  {
+    console.log("51. text-only unchanged");
+    let sentBody = null;
+    const h = makeHarness({
+      store: baseStore(),
+      fetchImpl: async (url, init) => { sentBody = JSON.parse(init.body); return ok([{ name: "Eggs", amount: "4", protein_g: 25 }]); },
+    });
+    h.els["food-input"].value = "4 eggs";
+    h.els["log-btn"].click();
+    check("no image field stored", !("image" in q(h)[0]), q(h)[0]);
+    await settle();
+    const content = sentBody.messages[0].content;
+    check("content is the bare string it always was", content === h.ctx.PARSE_PROMPT + JSON.stringify("4 eggs"), typeof content);
+    check("no photo wording anywhere in it", !/photo/i.test(content));
+  }
+
+  // ---- 52. each provider dresses the same photo in its own wire format
+  {
+    console.log("52. provider photo shapes");
+    const img = { mediaType: "image/jpeg", data: "CCCC" };
+    const gItem = gDelta('[{"name":"Reis","amount":"~200 g","protein_g":5,"certainty":"medium","calories_kcal":260,"calorie_certainty":"medium"}]');
+    let gBody = null;
+    const g1 = makeHarness({
+      store: geminiStore(),
+      fetchImpl: async (url, init) => { gBody = JSON.parse(init.body); return sse([gItem]); },
+    });
+    g1.ctx.setPhoto(img);
+    g1.els["log-btn"].click();
+    await settle();
+    const parts = gBody.contents[0].parts;
+    check("gemini: inlineData first, text after",
+      parts.length === 2 && parts[0].inlineData.mimeType === "image/jpeg" &&
+      parts[0].inlineData.data === "CCCC" && parts[1].text === g1.ctx.PHOTO_PROMPT, parts);
+
+    // The same harness again with nothing attached: the one part it always sent.
+    g1.els["food-input"].value = "reis";
+    g1.els["log-btn"].click();
+    await settle();
+    check("gemini: text alone keeps its one part",
+      gBody.contents[0].parts.length === 1 && "text" in gBody.contents[0].parts[0], gBody.contents[0].parts);
+
+    let dBody = null;
+    const d = makeHarness({
+      store: dsStore(),
+      fetchImpl: async (url, init) => {
+        dBody = JSON.parse(init.body);
+        return sse([oDelta('[{"name":"Toast","amount":"1 slice","protein_g":4,"certainty":"high","calories_kcal":90,"calorie_certainty":"medium"}]'), "data: [DONE]\n\n"]);
+      },
+    });
+    d.ctx.setPhoto(img);
+    d.els["log-btn"].click();
+    await settle();
+    const dc = dBody.messages[0].content;
+    check("openai-compatible: a data URL", dc[0].image_url.url === "data:image/jpeg;base64,CCCC" && dc[1].type === "text", dc);
+  }
+
+  // ---- 53. shrinking a photo takes long enough for the box to move on, and
+  //          what it moved on to wins: a photo that lands late must not undo
+  //          the × that dismissed it, nor ride along on the next entry.
+  {
+    console.log("53. a photo that arrives late");
+    const img = { mediaType: "image/jpeg", data: "DDDD" };
+    // The picker, driven the way a phone drives it, with the shrinking held
+    // open so the test can act while it is still going.
+    const pick = (h) => {
+      let done;
+      h.ctx.normalizePhoto = () => new Promise((r) => { done = r; });
+      h.els["photo-input"].files = [{}];
+      h.els["photo-input"].listeners.change[0]();
+      return () => done(img);
+    };
+
+    const cleared = makeHarness({ store: baseStore(), fetchImpl: async () => ok([]) });
+    const finish = pick(cleared);
+    cleared.els["photo-clear"].click();
+    finish();
+    await settle();
+    check("the × holds against a late photo", cleared.ctx.pendingPhoto === null, cleared.ctx.pendingPhoto);
+
+    // The same race against Log it: the entry goes without the photo, and the
+    // photo must not then attach itself to whatever is typed next.
+    let sentBody = null;
+    const logged = makeHarness({
+      store: baseStore(),
+      fetchImpl: async (url, init) => { sentBody = JSON.parse(init.body); return ok([{ name: "Eggs", amount: "4", protein_g: 25 }]); },
+    });
+    const finishLogged = pick(logged);
+    logged.els["food-input"].value = "4 eggs";
+    logged.els["log-btn"].click();
+    finishLogged();
+    await settle();
+    check("the entry went as typed", typeof sentBody.messages[0].content === "string", sentBody.messages[0].content);
+    check("and the late photo did not stay behind", logged.ctx.pendingPhoto === null, logged.ctx.pendingPhoto);
+
+    // Two picked in a hurry: the one picked last is the one meant, whichever
+    // order the two finish shrinking in — so both orders are asked for. The
+    // one that finishes first is the interesting one, since a claim staked by
+    // reading the counter rather than advancing it would let it win.
+    for (const firstDone of [true, false]) {
+      const raced = makeHarness({ store: baseStore(), fetchImpl: async () => ok([]) });
+      const holds = [];
+      raced.ctx.normalizePhoto = () => new Promise((r) => holds.push(r));
+      raced.els["photo-input"].files = [{}];
+      raced.els["photo-input"].listeners.change[0]();
+      raced.els["photo-input"].listeners.change[0]();
+      const done = [
+        () => holds[0]({ mediaType: "image/jpeg", data: "FIRST" }),
+        () => holds[1]({ mediaType: "image/jpeg", data: "SECOND" }),
+      ];
+      if (!firstDone) done.reverse();
+      done.forEach((f) => f());
+      await settle();
+      check("the photo picked last is the one held, " + (firstDone ? "in pick order" : "out of order"),
+        raced.ctx.pendingPhoto && raced.ctx.pendingPhoto.data === "SECOND", raced.ctx.pendingPhoto);
+    }
+  }
+
+  // ---- 54. the thumbnail is built once and moved, not decoded again on every
+  //          redraw the streaming preview asks for
+  {
+    console.log("54. one thumbnail per queued photo");
+    const g = gate();
+    const h = makeHarness({
+      store: baseStore(),
+      fetchImpl: async (url, init) => sse([
+        aDelta('[{"name":"Pasta","amount":"~250 g","protein_g":9,"certainty":"medium","calories_kcal":400,"calorie_certainty":"medium"},'),
+        () => g.held,
+        aDelta('{"name":"Sauce","amount":"~80 g","protein_g":2,"certainty":"low","calories_kcal":90,"calorie_certainty":"low"}]'),
+      ], init.signal),
+    });
+    h.ctx.setPhoto({ mediaType: "image/jpeg", data: "EEEE" });
+    h.els["log-btn"].click();
+    await settle();
+    const thumbOf = () => descendants(h.els["pending"].children[0]).find((c) => c.className === "pend-thumb");
+    const first = thumbOf();
+    check("drawn while estimating", !!first && first.src === "data:image/jpeg;base64,EEEE", first && first.src);
+    h.ctx.renderPending();
+    h.ctx.render();
+    check("the same node survives a redraw", thumbOf() === first, thumbOf() === first);
+    g.release();
+    await settle();
+    check("and is let go of with the entry", Object.keys(h.ctx.thumbNodes).length === 0, h.ctx.thumbNodes);
   }
 
   console.log("\n" + pass + " passed, " + fail + " failed");

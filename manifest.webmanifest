@@ -1,7 +1,7 @@
 {
   "name": "Fuzzy Protein",
   "short_name": "Protein",
-  "description": "Type what you ate in plain language, get grams of protein.",
+  "description": "Type what you ate in plain language, or photograph it, and get grams of protein.",
   "lang": "en",
   "start_url": "./",
   "scope": "./",

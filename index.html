@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#ffffff">
-<meta name="description" content="Type what you ate in plain language, get grams of protein and calories.">
+<meta name="description" content="Type what you ate in plain language, or photograph it, and get grams of protein and calories.">
 <title>Fuzzy Protein</title>
 <link rel="manifest" href="./manifest.webmanifest">
 <link rel="icon" type="image/png" href="./icon-192.png">
@@ -81,9 +81,9 @@
     left: -8px; right: -8px; height: 44px;
   }
   /* With the tap flash gone, a press needs to say it landed. */
-  .btn-solid:active, #log-btn:active { opacity: 0.75; }
+  .btn-solid:active, #log-btn:active, #photo-btn:active { opacity: 0.75; }
   .link-btn:active, .item-left:active, .item-grams:active,
-  .item-del:active, .pend-del:active, .pend-retry:active { opacity: 0.5; }
+  .item-del:active, .pend-del:active, .pend-retry:active, #photo-clear:active { opacity: 0.5; }
 
   /* Settings */
   #settings { margin-top: 16px; border: 2px solid #111; padding: 14px; display: none; }
@@ -161,10 +161,26 @@
     display: block; width: 100%; border: none; resize: none; padding: 12px;
   }
   #food-input:focus { outline: none; }
-  #log-btn {
-    display: block; width: 100%; background: #111; color: #fff; border: none;
-    font: inherit; font-weight: 700; font-size: 16px; padding: 12px; cursor: pointer;
+  /* Photo and Log it share the box's bottom edge, divided the way the metric
+     segments above are divided: by a rule between siblings, so which button
+     carries it is never a question anyone has to answer again. The file input
+     itself never draws — the button is the way in. */
+  #photo-input { display: none; }
+  .entry-actions { display: flex; border-top: 2px solid #111; }
+  .entry-actions button {
+    border: none; font: inherit; font-weight: 700; font-size: 16px;
+    padding: 12px; cursor: pointer;
   }
+  .entry-actions button + button { border-left: 2px solid #111; }
+  #photo-btn { background: #fff; color: #111; padding: 12px 16px; }
+  #log-btn { flex: 1; background: #111; color: #fff; }
+  /* The attached photo, small, with its way out. A row only when there is one. */
+  #photo-row {
+    display: none; align-items: center; justify-content: space-between;
+    padding: 10px 12px; border-top: 2px solid #111;
+  }
+  #photo-row.has-photo { display: flex; }
+  #photo-thumb { display: block; }
   #error {
     margin-top: 8px; font-size: 14px; font-weight: 700; color: #b3261e; display: none;
     white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.35;
@@ -192,10 +208,17 @@
     background: none; border: 2px solid #111; font: inherit; font-size: 13px;
     font-weight: 700; padding: 4px 8px; cursor: pointer;
   }
-  .pend-del {
+  /* The two × buttons that dismiss something without deleting anything logged:
+     the queued entry, and the photo attached to the box. One rule, so the
+     gesture looks the same wherever it is offered. */
+  .pend-del, #photo-clear {
     background: none; border: none; font: inherit; font-size: 18px;
     line-height: 1; padding: 0 2px; color: #6b6b6b; cursor: pointer;
   }
+  /* The photo at stamp size, in the entry box and in the queued row alike —
+     one picture, so one size, and only how each sits in its row differs. */
+  #photo-thumb, .pend-thumb { width: 44px; height: 44px; object-fit: cover; border: 2px solid #111; }
+  .pend-thumb { flex-shrink: 0; }
   #offline-note { margin-top: 8px; font-size: 13px; color: #6b6b6b; display: none; }
 
   /* Items */
@@ -437,8 +460,20 @@
            silently turned into "quart" it does not. -->
       <textarea id="food-input" rows="2" autocapitalize="none" autocorrect="off" spellcheck="false"
         placeholder="4 fried eggs, 2 spoons of sauerkraut…"></textarea>
-      <button id="log-btn" type="button">Log it</button>
+      <!-- The photo about to be logged, shown until it is. Hidden entirely
+           when there is none, so the box stays the two-line box it was. -->
+      <div id="photo-row">
+        <img id="photo-thumb" alt="">
+        <button id="photo-clear" type="button" aria-label="Remove photo">×</button>
+      </div>
+      <div class="entry-actions">
+        <button id="photo-btn" type="button" aria-label="Add a photo of the food">Photo</button>
+        <button id="log-btn" type="button">Log it</button>
+      </div>
     </div>
+    <!-- No capture attribute on purpose: with it iOS goes straight to the
+         camera, without it the sheet offers the camera and the library both. -->
+    <input id="photo-input" type="file" accept="image/*">
     <p id="error"></p>
     <p id="offline-note">Offline — queued entries send when you're back online.</p>
     <ul id="pending"></ul>
@@ -450,7 +485,7 @@
       <span class="label-tiny">logged</span>
       <button id="sort-toggle" class="link-btn" type="button"></button>
     </div>
-    <p id="empty-msg">Nothing logged yet. Type what you ate.</p>
+    <p id="empty-msg">Nothing logged yet. Type what you ate, or photograph it.</p>
     <ul id="items"></ul>
     <!-- Text comes from render(), which has two sentences to choose between.
          Left empty here so the wording has one owner, as with #sort-toggle. -->
@@ -493,7 +528,9 @@
 // opts = { thinking: "" | "on" | "off", effort: "" | <any string> }.
 // "" means send nothing and let the provider apply its own default. Values are
 // passed through verbatim — no whitelist here, so new API values keep working.
-// request() takes stream as its last argument and asks for SSE when it is set;
+// request() takes stream and then image as its trailing arguments: it asks for
+// SSE when stream is set, and folds the photo — {mediaType, data}, base64 with
+// no data: prefix — into its own image block shape when one is given;
 // delta() is the streaming half of extract() — the visible text one SSE chunk
 // carries, "" for a chunk that carries none (pings, reasoning, stops).
 // truncated() is the reading that tells an answer cut short from a finished one:
@@ -519,12 +556,15 @@ var OUTPUT_BUDGET = 16000;
 
 // The messages-shaped body Anthropic and the OpenAI-compatible providers agree on.
 // Only the "thinking on" type string and where effort lands actually differ, so
-// those get layered on by the caller.
-function chatBody(model, prompt, opts, stream) {
+// those get layered on by the caller. content is the prompt string, or the
+// provider's own block array when a photo rides along — the budget above is the
+// same either way, since what a photographed plate costs is more items in the
+// answer, and that is the room the one number already leaves.
+function chatBody(model, content, opts, stream) {
   var body = {
     model: model,
     max_tokens: OUTPUT_BUDGET,
-    messages: [{ role: "user", content: prompt }]
+    messages: [{ role: "user", content: content }]
   };
   if (opts.thinking === "off") body.thinking = { type: "disabled" };
   if (stream) body.stream = true;
@@ -540,8 +580,8 @@ var PROVIDERS = {
     // Suggestions only — the field accepts anything and sends it verbatim.
     efforts: ["low", "medium", "high", "xhigh", "max"],
     effortNote: "output_config.effort — Claude 4.6+ only (xhigh: 4.7+). Haiku 4.5 has no effort setting.",
-    request: function (key, model, prompt, opts, stream) {
-      var body = chatBody(model, prompt, opts, stream);
+    request: function (key, model, prompt, opts, stream, image) {
+      var body = chatBody(model, anthropicContent(prompt, image), opts, stream);
       // Adaptive thinking is the current form on Claude 4.6+; older models
       // (incl. the default Haiku 4.5) will reject it — the error is shown as-is.
       if (opts.thinking === "on") body.thinking = { type: "adaptive" };
@@ -587,8 +627,8 @@ var PROVIDERS = {
     keyHint: "sk-…",
     efforts: ["high", "max"],
     effortNote: "reasoning_effort — only high and max are distinct (low/medium map to high, xhigh to max).",
-    request: function (key, model, prompt, opts, stream) {
-      return openaiRequest("https://api.deepseek.com/chat/completions", key, model, prompt, opts, stream);
+    request: function (key, model, prompt, opts, stream, image) {
+      return openaiRequest("https://api.deepseek.com/chat/completions", key, model, prompt, opts, stream, image);
     },
     extract: openaiExtract,
     delta: openaiDelta,
@@ -602,8 +642,8 @@ var PROVIDERS = {
     keyHint: "sk-…",
     efforts: [],
     effortNote: "reasoning_effort — not documented by Moonshot; may be ignored or rejected.",
-    request: function (key, model, prompt, opts, stream) {
-      return openaiRequest("https://api.moonshot.ai/v1/chat/completions", key, model, prompt, opts, stream);
+    request: function (key, model, prompt, opts, stream, image) {
+      return openaiRequest("https://api.moonshot.ai/v1/chat/completions", key, model, prompt, opts, stream, image);
     },
     extract: openaiExtract,
     delta: openaiDelta,
@@ -617,7 +657,7 @@ var PROVIDERS = {
     keyHint: "AIza…",
     efforts: ["low", "high"],
     effortNote: "thinkingConfig.thinkingLevel — Gemini 3+ only; 2.5 uses a numeric thinkingBudget instead.",
-    request: function (key, model, prompt, opts, stream) {
+    request: function (key, model, prompt, opts, stream, image) {
       var cfg = {
         responseMimeType: "application/json",
         maxOutputTokens: OUTPUT_BUDGET
@@ -640,7 +680,12 @@ var PROVIDERS = {
           "content-type": "application/json"
         },
         body: {
-          contents: [{ role: "user", parts: [{ text: prompt }] }],
+          // camelCase, like every other field in this body: Gemini accepts the
+          // proto spelling (inline_data) too, but one body written two ways is
+          // a question for whoever reads it next.
+          contents: [{ role: "user", parts: image
+            ? [{ inlineData: { mimeType: image.mediaType, data: image.data } }, { text: prompt }]
+            : [{ text: prompt }] }],
           generationConfig: cfg
         }
       };
@@ -654,9 +699,34 @@ var PROVIDERS = {
   }
 };
 
+// The block shapes a photo takes on the messages-style wires. Without one the
+// prompt stays the bare string it always was — the array exists only when
+// there is an image to put in it, and the image goes first, the words after,
+// the order the vision guides ask for.
+function anthropicContent(prompt, image) {
+  if (!image) return prompt;
+  return [
+    { type: "image", source: { type: "base64", media_type: image.mediaType, data: image.data } },
+    { type: "text", text: prompt }
+  ];
+}
+function openaiContent(prompt, image) {
+  if (!image) return prompt;
+  return [
+    { type: "image_url", image_url: { url: photoUrl(image) } },
+    { type: "text", text: prompt }
+  ];
+}
+// A photo put back together: the inverse of the split normalizePhoto does, and
+// the one form both a browser and an OpenAI-shaped wire take it in. Kept split
+// in storage because Anthropic and Gemini want the halves named separately.
+function photoUrl(image) {
+  return "data:" + image.mediaType + ";base64," + image.data;
+}
+
 // OpenAI-compatible chat/completions shape, shared by DeepSeek and Kimi.
-function openaiRequest(url, key, model, prompt, opts, stream) {
-  var body = chatBody(model, prompt, opts, stream);
+function openaiRequest(url, key, model, prompt, opts, stream, image) {
+  var body = chatBody(model, openaiContent(prompt, image), opts, stream);
   if (opts.thinking === "on") body.thinking = { type: "enabled" };
   if (opts.effort) body.reasoning_effort = opts.effort;
   return {
@@ -817,7 +887,9 @@ var viewMetric = loadMetric();
 // Every submission lands here first and is only removed once it has been parsed
 // and written into a day. One code path online and off, and nothing is lost if
 // the tab dies mid-request.
-// Entry: {id, text, date, createdAt, attempts, error, parked, noThink}.
+// Entry: {id, text, date, createdAt, attempts, error, parked, noThink, image?}
+// — image is {mediaType, data} when a photo was attached, and it rides the
+// entry through storage so a photo survives everything the text does.
 function loadQueue() { return loadJSON(KEY_QUEUE, [], Array.isArray); }
 function saveQueue(q) { return saveJSON(KEY_QUEUE, q); }
 function updateQueue(fn) {
@@ -860,7 +932,11 @@ function dayLabel(key, long) {
 }
 
 // ---------- parsing ----------
-var PARSE_PROMPT = [
+// The rules, without the tail that names the input. Every mode shares them;
+// the tails differ, and only the photo tails speak of a photo, so a text-only
+// request is byte-for-byte the request it was before photos existed — and a
+// model that was never handed one is never invited to imagine it.
+var PARSE_RULES = [
   'You are a protein and calorie estimator. The input is a casual, fuzzy description of food',
   'someone ate, in any language, with vague amounts allowed. Split it into items and estimate,',
   'for each, both the grams of protein and the calories (kcal), using realistic metric portions.',
@@ -936,8 +1012,40 @@ var PARSE_PROMPT = [
   'Example input: "1 scheibe brot mit 40 g protein"   (impossible for one slice, so estimate it)',
   'Example output:',
   '[{"name":"Brot","amount":"1 Scheibe, ~45 g","protein_g":4,"certainty":"medium","calories_kcal":115,"calorie_certainty":"medium"}]',
+  ''
+].join("\n");
+
+var PARSE_PROMPT = PARSE_RULES + '\nNow do the same for this input: ';
+
+// What changes when the input is a photograph. The schema does not: the same
+// array comes back, so everything downstream of the answer never learns how
+// the food was described. The closing line rides in the array with the rules it
+// closes, so the photo tail — like the typed one above — is written once.
+var PHOTO_PROMPT = PARSE_RULES + '\n' + [
+  'A photo of the food is attached. Then:',
+  '- The photo is the input. Give every distinct food visible its own row, exactly as if it',
+  '  had been typed, and ignore plates, cutlery and everything else inedible.',
+  '- Estimate portions from what the frame shows — plate size, cutlery, packaging, the food',
+  '  against them — and state the weight you assumed in amount, as always.',
+  '- The certainty rules apply unchanged, judged on what the photo pins down: counted pieces',
+  '  (eggs, slices) can be "high"; a poured or heaped portion is a guessed portion; food',
+  '  hidden in a bowl or under a sauce ranges wide — say so with "low".',
   '',
-  'Now do the same for this input: '
+  'Now do the same for the food in this photo.'
+].join("\n");
+
+// The caption case is the photo case with the typed line named at the end, so it
+// extends that prompt rather than assembling a second copy of it. What the line
+// is for is said here and only here: a rule about the words that came with the
+// photo, read out to a photo that came alone, describes something that is not
+// there — which is the same reason none of the photo rules above reach a
+// request that carries no photo.
+var PHOTO_TEXT_PROMPT = PHOTO_PROMPT + [
+  ' The words sent with it are context about the',
+  'photo: they can name a food you cannot place, correct one, or state an amount, and a',
+  'stated amount, weight or figure wins over what you read off the image.',
+  '',
+  'The user adds: '
 ].join("\n");
 
 // Every failure says how it should be retried, decided here where the cause is
@@ -1134,15 +1242,18 @@ function modelItems(arr) {
 // item completed so far, put through the same mapping the final answer will
 // get. A report, not a result — the answer this function returns is parsed
 // from the finished text alone.
-// noThink is the queue asking for one try without reasoning, after a try with it
-// ran out of room. Effort goes with it: reasoning_effort beside a disabled
-// thinking is a contradiction, and the whole point of this attempt is that it
-// does not reason.
-async function parseFood(text, onItems, noThink) {
+// The queue entry is the request: what was typed, the photo if one was
+// attached, and whether a try that ran out of room has asked for this one to go
+// out without reasoning. Taking the entry whole rather than three of its fields
+// is what stops the next thing it carries from becoming a fourth argument.
+// noThink brings effort with it: reasoning_effort beside a disabled thinking is
+// a contradiction, and the whole point of this attempt is that it does not reason.
+async function parseFood(entry, onItems) {
+  var text = entry.text, image = entry.image;
   var id = provider();
   var p = PROVIDERS[id];
   var opts = optsFor(id);
-  if (noThink) { opts.thinking = "off"; opts.effort = ""; }
+  if (entry.noThink) { opts.thinking = "off"; opts.effort = ""; }
   // Streaming is asked for only when this browser can actually read a stream —
   // the flag changes what the server sends back, so it is never requested on
   // faith and left unreadable — only from a provider that brought a delta() to
@@ -1152,7 +1263,12 @@ async function parseFood(text, onItems, noThink) {
   var wantStream = typeof ReadableStream !== "undefined" &&
                    typeof TextDecoder !== "undefined" &&
                    typeof AbortController !== "undefined" && !!p.delta;
-  var req = p.request(apiKey(id), modelFor(id), PARSE_PROMPT + JSON.stringify(text), opts, wantStream);
+  // Which prompt depends on what there is to read: the typed line, the photo,
+  // or the photo with the line as its caption.
+  var prompt = !image ? PARSE_PROMPT + JSON.stringify(text)
+    : text ? PHOTO_TEXT_PROMPT + JSON.stringify(text)
+    : PHOTO_PROMPT;
+  var req = p.request(apiKey(id), modelFor(id), prompt, opts, wantStream, image);
 
   // Two clocks, and the request ends when either runs out.
   //   whole — the one deadline on the request from end to end, armed here and
@@ -1329,6 +1445,8 @@ var barFill = $("bar-fill"), goalMsg = $("goal-msg");
 var goalArea = $("goal-area"), barTrack = $("bar-track");
 var metricProteinBtn = $("metric-protein"), metricCaloriesBtn = $("metric-calories");
 var foodInput = $("food-input"), logBtn = $("log-btn"), errorEl = $("error");
+var photoBtn = $("photo-btn"), photoInput = $("photo-input");
+var photoRow = $("photo-row"), photoThumb = $("photo-thumb"), photoClear = $("photo-clear");
 var itemsEl = $("items"), emptyMsg = $("empty-msg"), itemsHint = $("items-hint");
 var itemsHead = $("items-head"), sortToggle = $("sort-toggle");
 var weekEl = $("week"), weekNote = $("week-note");
@@ -1723,6 +1841,29 @@ function editRow(it) {
   return li;
 }
 
+// What an entry goes by on screen. A photo logged without a word still has to
+// be called something, and the row and the button that discards it have to call
+// it the same thing — so they ask here rather than each deciding.
+function entryLabel(e) { return e.text || "Photo"; }
+
+// entry id -> the thumbnail drawn for it. The row around it is cheap to
+// rebuild and gets rebuilt constantly — once per item the stream finishes —
+// but the picture inside it is a JPEG that has to be decoded again every time
+// it is built from scratch. So it is built once and moved, the way an open
+// editor row is (see render), and let go of where the entry is (see
+// removeEntry). In memory only, like the send flags: it is a drawing of the
+// entry, never a second copy of it.
+var thumbNodes = {};
+function entryThumb(e) {
+  var t = thumbNodes[e.id];
+  if (!t) {
+    t = thumbNodes[e.id] = el("img", "pend-thumb");
+    t.alt = "";
+    t.src = photoUrl(e.image);
+  }
+  return t;
+}
+
 // Pending entries live outside the day totals: their protein is unknown until
 // parsed, so counting them would make the headline number lie. They are listed
 // separately, and carry their own date because an entry queued last night must
@@ -1736,7 +1877,7 @@ function renderPending() {
 
   q.forEach(function (e) {
     var left = el("div", "pend-left");
-    left.appendChild(el("div", "pend-text", e.text));
+    left.appendChild(el("div", "pend-text", entryLabel(e)));
     left.appendChild(el("div", "pend-meta", pendingStatus(e)));
 
     var right = el("div", "pend-right");
@@ -1746,9 +1887,10 @@ function renderPending() {
       retry.addEventListener("click", function () { retryPending(e.id); });
       right.appendChild(retry);
     }
-    right.appendChild(delButton("pend-del", "Discard " + e.text, function () { dropPending(e.id); }));
+    right.appendChild(delButton("pend-del", "Discard " + entryLabel(e), function () { dropPending(e.id); }));
 
     var li = el("li", e.parked ? "failed" : "");
+    if (e.image) li.appendChild(entryThumb(e));
     li.appendChild(left);
     li.appendChild(right);
     pendingEl.appendChild(li);
@@ -1822,14 +1964,89 @@ function updateItem(id, fields) {
   stopEdit();
 }
 
+// The photo attached to the box, waiting to be logged with whatever is typed.
+// {mediaType, data} with the base64 kept bare — each provider dresses it in
+// its own wire format. Null when there is none.
+var pendingPhoto = null;
+// Which photo the box is waiting for. Shrinking one takes long enough that the
+// box can move on while it happens — the × can clear it, Log it can take the
+// entry, a second photo can be picked — and each of those is this number
+// moving. A shrink that finishes into a number that has moved is one nobody is
+// waiting for any more, so it is dropped rather than attaching itself to
+// whatever the box holds by then.
+var photoSeq = 0;
+
+function setPhoto(img) {
+  photoSeq++;
+  pendingPhoto = img || null;
+  photoRow.classList.toggle("has-photo", !!pendingPhoto);
+  photoThumb.src = pendingPhoto ? photoUrl(pendingPhoto) : "";
+}
+
+// A phone photo is measured in megabytes and the models read food fine at a
+// fraction of that, so it is shrunk before it is stored or sent: longest side
+// capped, re-encoded as JPEG. The re-encode is also what makes the format
+// boring — a HEIC from the library comes out JPEG, and the rotation the file
+// kept in EXIF is baked into the pixels by the draw. The type is read back off
+// the data URL rather than assumed: a browser that cannot write JPEG answers
+// with PNG, and the wire should carry what is actually there.
+//
+// How big the result may be, and the settings it tries in order to get there.
+// The first is the one nearly every photo uses: a plate at 1024px lands around
+// 110 KB, nowhere near the ceiling. The rest are for the two that overshoot —
+// a busy frame, where JPEG has more detail to keep than it can, and the PNG a
+// browser without a JPEG encoder falls back to, which ignores quality entirely
+// and can only be shrunk by drawing it smaller. Sized so several photos can
+// wait in the queue inside a ~5 MB origin without crowding out the day log,
+// and so no provider's own image ceiling is ever what stops an entry. The last
+// setting is taken whether or not it fits: a photo too stubborn for all four is
+// still better sent than refused.
+var PHOTO_MAX = 400000;
+var PHOTO_STEPS = [[1024, 0.8], [1024, 0.6], [768, 0.5], [512, 0.4]];
+function normalizePhoto(file) {
+  return new Promise(function (resolve, reject) {
+    var url = URL.createObjectURL(file);
+    var img = new Image();
+    img.onload = function () {
+      URL.revokeObjectURL(url);
+      try {
+        var out = null;
+        for (var i = 0; i < PHOTO_STEPS.length; i++) {
+          out = encodePhoto(img, PHOTO_STEPS[i][0], PHOTO_STEPS[i][1]);
+          if (!out) return reject(new Error("unencodable image"));
+          if (out.data.length <= PHOTO_MAX) break;
+        }
+        resolve(out);
+      } catch (err) { reject(err); }
+    };
+    img.onerror = function () { URL.revokeObjectURL(url); reject(new Error("undecodable image")); };
+    img.src = url;
+  });
+}
+
+// One draw at one size, encoded once. Null when what came back is not a base64
+// data URL at all — which is also how an image with no pixels to draw arrives,
+// since a canvas with a zero side encodes to nothing worth sending.
+function encodePhoto(img, edge, quality) {
+  var scale = Math.min(1, edge / Math.max(img.naturalWidth, img.naturalHeight));
+  var canvas = document.createElement("canvas");
+  canvas.width = Math.round(img.naturalWidth * scale);
+  canvas.height = Math.round(img.naturalHeight * scale);
+  canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
+  var dataUrl = canvas.toDataURL("image/jpeg", quality);
+  var m = /^data:([^;]+);base64,/.exec(dataUrl);
+  return m ? { mediaType: m[1], data: dataUrl.slice(m[0].length) } : null;
+}
+
 // Enqueue first, then try to send. Not "send, and queue on failure" — this way
 // there is one path online and off, and a crash mid-request loses nothing.
 function log() {
   var text = foodInput.value.trim();
-  if (!text) return;
+  var photo = pendingPhoto;
+  if (!text && !photo) return;
 
   var ok = updateQueue(function (q) {
-    q.push({
+    var e = {
       id: newId(),
       text: text,
       date: todayKey(),   // stamped now: a late send must not slide into the next day
@@ -1837,12 +2054,19 @@ function log() {
       attempts: 0,
       error: "",
       parked: false
-    });
+    };
+    // Only a photo entry carries the field at all; a text entry is stored
+    // exactly as it always was.
+    if (photo) e.image = photo;
+    q.push(e);
     return q;
   });
   if (!ok) { showError(STORAGE_FAIL); return; }
 
+  // Cleared only now: had the write above failed, the photo stays in the box
+  // the same way the text does.
   foodInput.value = "";
+  setPhoto(null);
   showError("");
   render();
   foodInput.focus();
@@ -1872,6 +2096,7 @@ function removeEntry(id) {
     return q.filter(function (e) { return e.id !== id; });
   });
   delete cooling[id];
+  delete thumbNodes[id];
 }
 
 function dropPending(id) {
@@ -2023,10 +2248,10 @@ async function send(e) {
       // last one whole. Only the pending list redraws for it: a full render()
       // would rebuild the day, the chart and the history for every step, and
       // renderPending never touches an open item editor.
-      parsed = await parseFood(e.text, function (items) {
+      parsed = await parseFood(e, function (items) {
         streamProgress[e.id] = items;
         renderPending();
-      }, e.noThink);
+      });
     } catch (err) {
       failure = err;
     }
@@ -2095,6 +2320,33 @@ foodInput.addEventListener("keydown", function (e) {
     log();
   }
 });
+
+// The picker must open inside the tap that asked for it — iOS ignores a
+// click() from anywhere else. Reaching for a photo is also a moment a request
+// is coming that no textarea focus announces, so the connection warms here the
+// way it does there; the picker round-trip is the warm-up window.
+photoBtn.addEventListener("click", function () {
+  preconnect();
+  photoInput.click();
+});
+photoInput.addEventListener("change", function () {
+  var f = photoInput.files && photoInput.files[0];
+  // Cleared at once, so picking the same photo again still fires a change.
+  photoInput.value = "";
+  if (!f) return;
+  // Picking is itself the box moving on, so it claims the next number rather
+  // than reading the current one: two photos picked in a hurry would otherwise
+  // hold the same claim, and whichever finished first would win. If the box
+  // moves again before this one is ready, it is no longer the answer to
+  // anything — see photoSeq.
+  var seq = ++photoSeq;
+  normalizePhoto(f).then(function (img) {
+    if (seq === photoSeq) setPhoto(img);
+  }, function () {
+    if (seq === photoSeq) showError("Couldn't read that photo — try a different one.");
+  });
+});
+photoClear.addEventListener("click", function () { setPhoto(null); });
 
 PROVIDER_IDS.forEach(function (id) {
   var opt = document.createElement("option");

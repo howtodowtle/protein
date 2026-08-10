@@ -1024,9 +1024,6 @@ var PHOTO_PROMPT = PARSE_RULES + '\n' + [
   '  had been typed, and ignore plates, cutlery and everything else inedible.',
   '- Estimate portions from what the frame shows — plate size, cutlery, packaging, the food',
   '  against them — and state the weight you assumed in amount, as always.',
-  '- Text sent along with the photo is context about it: it can name a food you cannot place,',
-  '  correct one, or state an amount. A stated amount, weight or figure wins over what you',
-  '  read off the image.',
   '- The certainty rules apply unchanged, judged on what the photo pins down: counted pieces',
   '  (eggs, slices) can be "high"; a poured or heaped portion is a guessed portion; food',
   '  hidden in a bowl or under a sauce ranges wide — say so with "low".',
@@ -1035,8 +1032,18 @@ var PHOTO_PROMPT = PARSE_RULES + '\n' + [
 ].join("\n");
 
 // The caption case is the photo case with the typed line named at the end, so it
-// extends that prompt rather than assembling a second copy of it.
-var PHOTO_TEXT_PROMPT = PHOTO_PROMPT + ' The user adds: ';
+// extends that prompt rather than assembling a second copy of it. What the line
+// is for is said here and only here: a rule about the words that came with the
+// photo, read out to a photo that came alone, describes something that is not
+// there — which is the same reason none of the photo rules above reach a
+// request that carries no photo.
+var PHOTO_TEXT_PROMPT = PHOTO_PROMPT + [
+  ' The words sent with it are context about the',
+  'photo: they can name a food you cannot place, correct one, or state an amount, and a',
+  'stated amount, weight or figure wins over what you read off the image.',
+  '',
+  'The user adds: '
+].join("\n");
 
 // Every failure says how it should be retried, decided here where the cause is
 // actually known rather than re-derived later from a status code:

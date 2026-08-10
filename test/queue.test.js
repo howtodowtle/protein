@@ -1478,6 +1478,10 @@ const geminiStore = () => ({ "protein.provider": "gemini", "protein.apiKey.gemin
     const content = sentBody.messages[0].content;
     check("image block first, words after", Array.isArray(content) && content[0].source.media_type === "image/jpeg" && content[0].source.data === "AAAA", content);
     check("photo prompt with the text as caption", content[1].text === h.ctx.PHOTO_TEXT_PROMPT + JSON.stringify("with ketchup"), content[1]);
+    // The caption case is the photo case plus what the caption is for — one
+    // owner for the photo rules, and the extra rule only where it applies.
+    check("it is the photo prompt, extended", content[1].text.indexOf(h.ctx.PHOTO_PROMPT) === 0, content[1].text.slice(0, 40));
+    check("and it says what the words are for", /words sent with it/i.test(content[1].text));
     check("item landed without the photo", only(h).protein === 25 && !("image" in only(h)), only(h));
     check("queue drained", q(h).length === 0, q(h));
   }
@@ -1506,7 +1510,11 @@ const geminiStore = () => ({ "protein.provider": "gemini", "protein.apiKey.gemin
     check("thumbnail drawn from the entry", !!thumb && thumb.src === "data:image/jpeg;base64,BBBB", thumb && thumb.src);
     check("wordless entry still reads as itself", pendPart(h, "pend-text")[0] === "Photo", pendPart(h, "pend-text"));
     check("estimating like any other", /estimating…/.test(pendMeta(h)[0]), pendMeta(h));
-    check("photo-only prompt, nothing appended", sentBody.messages[0].content[1].text === h.ctx.PHOTO_PROMPT, sentBody.messages[0].content[1]);
+    const prompt = sentBody.messages[0].content[1].text;
+    check("photo-only prompt, nothing appended", prompt === h.ctx.PHOTO_PROMPT, sentBody.messages[0].content[1]);
+    // The mirror of test 51's "no photo wording": a photo that came alone is
+    // told nothing about words that came with it, because none did.
+    check("no caption wording anywhere in it", !/words sent with it|user adds/i.test(prompt));
     g.release();
     await settle();
     check("committed", only(h).protein === 9, days(h));

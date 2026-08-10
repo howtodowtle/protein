@@ -1552,9 +1552,9 @@ const geminiStore = () => ({ "protein.provider": "gemini", "protein.apiKey.gemin
     g1.els["log-btn"].click();
     await settle();
     const parts = gBody.contents[0].parts;
-    check("gemini: inline_data first, text after",
-      parts.length === 2 && parts[0].inline_data.mime_type === "image/jpeg" &&
-      parts[0].inline_data.data === "CCCC" && parts[1].text === g1.ctx.PHOTO_PROMPT, parts);
+    check("gemini: inlineData first, text after",
+      parts.length === 2 && parts[0].inlineData.mimeType === "image/jpeg" &&
+      parts[0].inlineData.data === "CCCC" && parts[1].text === g1.ctx.PHOTO_PROMPT, parts);
 
     // The same harness again with nothing attached: the one part it always sent.
     g1.els["food-input"].value = "reis";

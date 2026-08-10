@@ -680,8 +680,11 @@ var PROVIDERS = {
           "content-type": "application/json"
         },
         body: {
+          // camelCase, like every other field in this body: Gemini accepts the
+          // proto spelling (inline_data) too, but one body written two ways is
+          // a question for whoever reads it next.
           contents: [{ role: "user", parts: image
-            ? [{ inline_data: { mime_type: image.mediaType, data: image.data } }, { text: prompt }]
+            ? [{ inlineData: { mimeType: image.mediaType, data: image.data } }, { text: prompt }]
             : [{ text: prompt }] }],
           generationConfig: cfg
         }

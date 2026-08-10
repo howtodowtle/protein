@@ -1329,9 +1329,54 @@ const dsStore = () => ({ "protein.provider": "deepseek", "protein.apiKey.deepsee
     check("and the retry landed", only(h).protein === 25, days(h));
   }
 
-  // ---- 45. a model that simply wrote prose still says so in one line
+  // ---- 45. thinking can overrun a clock as easily as a token budget, and the
+  //          remedy is the same one. A stall is not this: that is a dead
+  //          connection, which says nothing about what was asked.
   {
-    console.log("45. long garbage is cut to a line");
+    console.log("45. thinking that outlasts the clock");
+    let calls = 0;
+    const h = makeHarness({
+      store: { ...dsStore(), "protein.thinking.deepseek": "on" },
+      fetchImpl: (url, init) => {
+        calls++;
+        // The first try never answers and is cut off by the whole-request clock;
+        // the try that follows is the one that has to arrive.
+        if (calls === 1) return abortsWith(init.signal);
+        return sse([oDelta('[{"name":"Eggs","amount":"4","protein_g":25,"certainty":"high","calories_kcal":360,"calorie_certainty":"high"}]')]);
+      },
+    });
+    h.ctx.REQUEST_MS = 20;
+    h.ctx.RETRY_MS[0] = 60;   // long enough to still be waiting at the first checks
+    h.els["food-input"].value = "4 eggs";
+    h.els["log-btn"].click();
+    await settle();
+    check("named as the wait that ran out", /No answer from/.test(q(h)[0].error), q(h)[0].error);
+    check("marked for the try without thinking", q(h)[0].noThink === true, q(h)[0]);
+    check("not parked while that try is left", q(h)[0].parked === false, q(h)[0]);
+    await settle(120);
+    check("which went out without it", calls === 2 && only(h).protein === 25, days(h));
+  }
+
+  // ---- 46. a stall is a dead connection, not thinking that ran long, so the
+  //          same request is still the one worth making
+  {
+    console.log("46. a stall is not an overrun");
+    const h = makeHarness({
+      store: { ...dsStore(), "protein.thinking.deepseek": "on" },
+      fetchImpl: async (url, init) => sse([oReason("thinking… "), () => abortsWith(init.signal)]),
+    });
+    h.ctx.STALL_MS = 20;
+    h.ctx.RETRY_MS[0] = 60;
+    h.els["food-input"].value = "4 eggs";
+    h.els["log-btn"].click();
+    await settle();
+    check("named as the stall it was", /stalled/.test(q(h)[0].error), q(h)[0].error);
+    check("and not blamed on the thinking", q(h)[0].noThink === undefined, q(h)[0]);
+  }
+
+  // ---- 47. a model that simply wrote prose still says so in one line
+  {
+    console.log("47. long garbage is cut to a line");
     const h = makeHarness({
       streamCapable: false, store: baseStore(),
       fetchImpl: async () => aWhole("Here is the JSON array you asked for.\n".repeat(150)),
@@ -1346,11 +1391,11 @@ const dsStore = () => ({ "protein.provider": "deepseek", "protein.apiKey.deepsee
     check("no newlines of its own", !/\n/.test(err), err);
   }
 
-  // ---- 46. the budget the request actually carries, which is the whole bug:
+  // ---- 48. the budget the request actually carries, which is the whole bug:
   //          a model left on its provider's default reasons anyway, so the
   //          default gets the room too
   {
-    console.log("46. the budget on the wire");
+    console.log("48. the budget on the wire");
     // What one request put on the wire, for a store and the wire format that
     // store speaks. The answer is empty because nothing here reads it.
     const sentFor = async (store, delta = oDelta) => {

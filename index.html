@@ -1179,12 +1179,22 @@ async function parseFood(text, onItems, noThink) {
     if (stall) clearTimeout(stall);
     stall = setTimeout(function () { cutOff("stall"); }, STALL_MS);
   }
+  // A stall is a dead connection and says nothing about what was asked, so the
+  // same request is worth making again. Running out the whole clock is the other
+  // kind of overrun: the thinking took longer than there was, which is the same
+  // trouble as spending the whole token budget on it and takes the same answer —
+  // one try without thinking, which has an answer's worth of tokens to write and
+  // no deliberating to do, and so comfortably beats the clock it just lost to.
+  // Without this the identical request goes out twice more, each time running
+  // the clock all the way down again to fail the same way.
   function timeoutErr() {
-    return timedOut === "stall"
-      ? apiError(p.host + " stalled — nothing arrived for " +
-          Math.round(STALL_MS / 1000) + "s.", "soft")
-      : apiError("No answer from " + p.host + " after " +
-          Math.round(REQUEST_MS / 1000) + "s.", "soft");
+    if (timedOut === "stall") {
+      return apiError(p.host + " stalled — nothing arrived for " +
+        Math.round(STALL_MS / 1000) + "s.", "soft");
+    }
+    return apiError("No answer from " + p.host + " after " +
+      Math.round(REQUEST_MS / 1000) + "s.",
+      opts.thinking === "off" ? "soft" : "downgrade");
   }
 
   try {

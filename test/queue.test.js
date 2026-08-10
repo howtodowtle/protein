@@ -1009,7 +1009,7 @@ const dsStore = () => ({ "protein.provider": "deepseek", "protein.apiKey.deepsee
   {
     console.log("31. deepseek streaming");
     const h = makeHarness({
-      store: { "protein.provider": "deepseek", "protein.apiKey.deepseek": "sk-ds" },
+      store: dsStore(),
       fetchImpl: async () => sse([
         oDelta(null), // a reasoning chunk: content is null, not text
         oDelta('[{"name":"Toast","amount":"1 slice","protein_g":4,"certainty":"high","calories_kcal":90,"calorie_certainty":"medium"}]'),
@@ -1145,10 +1145,11 @@ const dsStore = () => ({ "protein.provider": "deepseek", "protein.apiKey.deepsee
       streamCapable: false, store: baseStore(),
       fetchImpl: async () => { calls++; return aWhole('[{"name":"Eg', { stop_reason: "max_tokens" }); },
     });
-    h.ctx.RETRY_MS[0] = 20;
     h.els["food-input"].value = "4 eggs";
     h.els["log-btn"].click();
-    await settle(80);
+    // Nothing is scheduled: an answer that outgrew the room is terminal, so
+    // there is no timer here to wait out.
+    await settle();
     check("named as the ceiling it was", /ran out of room/.test(q(h)[0].error), q(h)[0].error);
     check("not blamed on the model's writing", !/Model did not return JSON/.test(q(h)[0].error), q(h)[0].error);
     check("nothing written from half an answer", Object.keys(days(h)).length === 0, days(h));
@@ -1180,31 +1181,26 @@ const dsStore = () => ({ "protein.provider": "deepseek", "protein.apiKey.deepsee
   // ---- 40. the same news again, but from a stream that said nothing else. A
   //          reasoning model streams its thinking as content-less chunks, so a
   //          budget spent entirely on thinking arrives as an answer of no text
-  //          at all — and the only thing distinguishing it from a provider that
-  //          ignored the stream flag is that the frames were real.
+  //          at all — which sends it down the branch meant for a provider that
+  //          ignored the stream flag, where the body is SSE frames and will not
+  //          parse. What the frames already said about why it stopped has to
+  //          survive that. 41 has the retry this earns; here it only has to be
+  //          read as a ceiling rather than as a model with nothing to say.
   {
     console.log("40. a stream of nothing but thinking");
-    const bodies = [];
     const h = makeHarness({
       store: { ...dsStore(), "protein.thinking.deepseek": "on" },
-      fetchImpl: async (url, init) => {
-        bodies.push(JSON.parse(init.body));
-        return sse(bodies.length === 1
-          ? [oReason("Need estimate each. "), oReason("Wait rule says ~10g. "), oFinish("length"), "data: [DONE]\n\n"]
-          : [oDelta('[{"name":"Eggs","amount":"4","protein_g":25,"certainty":"high","calories_kcal":360,"calorie_certainty":"high"}]')]);
-      },
+      fetchImpl: async () => sse([
+        oReason("Need estimate each. "), oReason("Wait rule says ~10g. "),
+        oFinish("length"), "data: [DONE]\n\n",
+      ]),
     });
-    h.ctx.RETRY_MS[0] = 60;   // long enough to still be waiting at the first checks
     h.els["food-input"].value = "4 eggs";
     h.els["log-btn"].click();
     await settle();
     check("read as the ceiling, not as a model with nothing to say",
       /spent its whole token budget thinking/.test(q(h)[0].error), q(h)[0].error);
-    check("not one word of the trace", !/Wait rule says/.test(q(h)[0].error), q(h)[0].error);
     check("marked for the try without thinking", q(h)[0].noThink === true, q(h)[0]);
-    await settle(120);
-    check("which went out without it", bodies[1] && bodies[1].thinking.type === "disabled", bodies[1]);
-    check("and landed", only(h).protein === 25, days(h));
   }
 
   // ---- 41. the reported bug, whole: thinking on, the budget spent entirely on
@@ -1268,12 +1264,11 @@ const dsStore = () => ({ "protein.provider": "deepseek", "protein.apiKey.deepsee
   }
 
   // ---- 43. a downgrade earns a try the retry list did not budget for, so the
-  //          step it waits on is the last one rather than one off the end.
-  //          A step off the end is `undefined`, and now + undefined is NaN —
-  //          which mark() reads as no cooldown at all and deletes, so the entry
-  //          does not hang, it goes straight back out with no wait. That is the
-  //          difference this measures: the try still happens either way, so the
-  //          only thing that tells the two apart is whether it waited.
+  //          step it waits on is the last one rather than one off the end. A
+  //          step off the end is `undefined`, and now + undefined is NaN, which
+  //          mark() reads as no cooldown at all and deletes — so the entry does
+  //          not hang, it goes straight back out with no wait. The try happens
+  //          either way; whether it waited is the whole difference.
   {
     console.log("43. a downgrade past the end of the retry list");
     let calls = 0;
@@ -1282,23 +1277,30 @@ const dsStore = () => ({ "protein.provider": "deepseek", "protein.apiKey.deepsee
       fetchImpl: async () => {
         calls++;
         // Two soft failures first, so the truncation lands on attempt 3 — one
-        // past the last step the list holds.
-        return calls <= 2 ? httpErr(503, "overloaded") : sse([oWhole({ finish: "length" })]);
+        // past the last step the list holds. The wait it earns is widened only
+        // once those are through, so the state below can be read at leisure
+        // instead of inside a window timed to the millisecond.
+        if (calls <= 2) return httpErr(503, "overloaded");
+        h.ctx.RETRY_MS[1] = 5000;
+        return sse([oWhole({ finish: "length" })]);
       },
     });
     h.ctx.RETRY_MS[0] = 5;
-    h.ctx.RETRY_MS[1] = 120;
+    h.ctx.RETRY_MS[1] = 5;
     h.els["food-input"].value = "4 eggs";
     h.els["log-btn"].click();
-    // Two 503s and the truncation are through by ~125ms; the downgraded try is
-    // one more 120ms step after that. Here, in between.
-    await settle(180);
+    await settle();
+    const id = q(h)[0].id;
     check("the truncation landed past the last step", q(h)[0].attempts === 3, q(h)[0]);
     check("and bought a try the list had no step for", q(h)[0].noThink === true, q(h)[0]);
-    check("which waits its turn rather than going out at once", calls === 3, calls);
-    check("on a moment that actually arrives", Number.isFinite(h.ctx.cooling[q(h)[0].id]),
-      h.ctx.cooling);
-    await settle(160);
+    // Waiting, and on a moment that arrives — not sent, and not on the NaN that
+    // an unclamped step would have left, which mark() drops entirely.
+    check("which waits its turn rather than going out at once",
+      h.ctx.cooling[id] > Date.now() && !h.ctx.sending[id], h.ctx.cooling);
+    // Rather than sit out the wait: a trigger beats a cooldown, which is what
+    // drainNow is for.
+    h.ctx.drainNow();
+    await settle();
     check("and then goes, and parks", calls === 4 && q(h)[0].parked === true, q(h)[0]);
   }
 

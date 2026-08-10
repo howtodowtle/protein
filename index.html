@@ -500,21 +500,17 @@
 // the provider's own word for why it stopped. A whole body and the chunk that
 // closes a stream say it in the same place, so one function reads either.
 
-// Room for the answer and — where the provider charges thinking against the same
-// ceiling, which some do and some do not, and which of the two a given model is
-// is not something the app can ask — for the thinking that comes first. A model
-// that keeps its reasoning off this budget simply never needs the extra room.
-// Bounded from both sides, which leaves one number rather than one per
+// Room for the answer and, where the provider charges thinking against the same
+// ceiling, for the thinking that comes first. A model that keeps its reasoning
+// off this budget simply never needs the extra room, so it is sized for the ones
+// that do. Bounded from both sides, which leaves one number rather than one per
 // provider: it has to clear what the thinking actually costs, and 4000 did not
 // (a model spent every one of them deliberating and had none left to answer
 // with), and it has to stay under the lowest output ceiling of the models this
-// app actually asks for — 64k on deepseek-reasoner, Claude and Gemini, 384k on
-// the DeepSeek V4 pair, and a quarter of a million on current Kimi. Nothing is
-// charged for room left unused, so the number leans generous: a meal is one
-// short array, and the only thing this ceiling should ever stop is a model that
-// has lost the thread entirely, which the whole-request clock ends anyway.
-// The one model it would not fit is deepseek-chat, which caps max_tokens at 8k —
-// see the model default below, which is why it is no longer the one asked for.
+// app asks for, every one of which is 64k or more. Nothing is charged for room
+// left unused, so the number leans generous: the only thing this ceiling should
+// ever stop is a model that has lost the thread entirely — and note that at
+// typical speeds REQUEST_MS, not this, is what ends such a request first.
 var THINKING_BUDGET = 16000;
 // Thinking off: the array is all that is coming. Seven items at six fields each is
 // ~400 tokens, so the 500 this replaces was one long dinner from cutting itself off.
@@ -591,10 +587,10 @@ var PROVIDERS = {
   deepseek: {
     label: "DeepSeek",
     host: "api.deepseek.com",
-    // deepseek-chat is the older model and caps max_tokens at 8k, which is under
-    // the budget a thinking model needs — asking for it would 400 every request
-    // the moment thinking is anything but off. A model you set yourself still
-    // wins over this; only a provider nobody has configured lands here.
+    // The current model, and the one with the headroom: deepseek-chat is the
+    // older one and caps max_tokens at 8k, under THINKING_BUDGET, so asking for
+    // it would 400 every request the moment thinking was anything but off. A
+    // model you set yourself still wins; only an unconfigured provider lands here.
     model: "deepseek-v4-flash",
     keyHint: "sk-…",
     efforts: ["high", "max"],
@@ -634,14 +630,14 @@ var PROVIDERS = {
         responseMimeType: "application/json",
         maxOutputTokens: maxTokens(opts)
       };
-      // thinkingBudget: 0 disables, -1 lets the model decide.
+      // thinkingBudget: 0 disables, -1 lets the model decide, and Gemini 3+ calls
+      // the effort dial thinkingLevel — one field, three ways to set it, so one
+      // chain rather than three assignments racing for it. Order is the rule:
+      // effort outranks letting the model decide, but nothing outranks "off",
+      // which is how a set effort used to turn thinking back on and leave it a
+      // budget sized for the answer alone to do it in.
       if (opts.thinking === "off") cfg.thinkingConfig = { thinkingBudget: 0 };
-      // Gemini 3+ calls the effort dial thinkingLevel; the value is sent verbatim.
-      // thinkingLevel and thinkingBudget are mutually exclusive, so effort wins —
-      // but not over an explicit "off", which used to be overwritten here and set
-      // a model thinking against a budget sized for an answer alone. How much to
-      // think cannot outrank whether to.
-      if (opts.effort && opts.thinking !== "off") cfg.thinkingConfig = { thinkingLevel: opts.effort };
+      else if (opts.effort) cfg.thinkingConfig = { thinkingLevel: opts.effort };
       else if (opts.thinking === "on") cfg.thinkingConfig = { thinkingBudget: -1 };
       return {
         url: "https://generativelanguage.googleapis.com/v1beta/models/" +
@@ -984,20 +980,17 @@ function snip(s) {
 var THINKING_FIELD = /"(reasoning_content|reasoning|thinking|thought)"\s*:/;
 
 // A cut-off answer is not bad luck — the same request meets the same ceiling and
-// spends it the same way, so asking again unchanged only re-buys the thinking
-// that overran. Terminal, therefore, unless there is something to change: when
-// the model was allowed to think, the thinking is the thing that spent the room,
-// and turning it off for one try is worth more than parking. Which of the two it
-// is, is settled here, where the options the request went out with are known —
-// on the try without thinking, thought is already false and the class is already
-// terminal, so the once-only rule needs saying nowhere else. What happens next is
-// the row's to say, so the words here stop at what happened.
-// Only one of the two truncations is worth another try, and the answer already
-// says which: text before the cut means the model was writing the array and
-// outgrew the room, and turning thinking off cannot shorten an answer — it only
-// hands the same answer a smaller ceiling, since a request that does not think
-// is capped at what one array needs. Nothing before the cut means the thinking
-// took it all, and that is the one thing there is left to turn off.
+// spends it the same way, so asking again unchanged only re-buys what overran.
+// Terminal, therefore, unless something is left to change, and the answer itself
+// says whether anything is: text before the cut means the model was writing the
+// array and outgrew the room, which turning thinking off cannot shorten — it
+// only hands the same answer a smaller ceiling, a request that does not think
+// being capped at what one array needs. Nothing before the cut means the
+// thinking took it all, and that is the one thing there is to turn off.
+// Settled here because this is where the options the request went out with are
+// known: on the try without thinking, thought is already false and the class is
+// already terminal, so the once-only rule needs saying nowhere else. What
+// happens next is the row's to say, so the words here stop at what happened.
 function cutOffError(p, clean, thinkingOn) {
   var thought = !clean && thinkingOn;
   return apiError(p.host + (clean

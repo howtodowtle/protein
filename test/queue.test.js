@@ -117,19 +117,31 @@ const netFail = () => { throw new TypeError("Failed to fetch"); };
 // function returning a promise — so a stream can park on a gate mid-answer,
 // or die the way an aborted read does.
 const enc = new TextEncoder();
-const sse = (frames) => ({
-  ok: true, status: 200,
-  body: { getReader: () => ({ i: 0, async read() {
-    await Promise.resolve();
-    if (this.i >= frames.length) return { done: true };
-    const f = frames[this.i++];
-    if (typeof f === "function") { await f(); return this.read(); }
-    return { done: false, value: enc.encode(f) };
-  } }) },
-  // Streaming reads the body as a stream; reaching for text() means the app
-  // took the wrong path.
-  text: async () => { throw new Error("text() on a streamed response"); },
-});
+// Given the request's signal, the reader also dies the way a real one does
+// when the app calls the request off — without it, a stream the app has
+// abandoned would keep feeding a test that is no longer listening.
+const sse = (frames, signal) => {
+  const gone = () => { const e = new Error("aborted"); e.name = "AbortError"; return e; };
+  return {
+    ok: true, status: 200,
+    body: { getReader: () => ({ i: 0, async read() {
+      await Promise.resolve();
+      if (signal && signal.aborted) throw gone();
+      if (this.i >= frames.length) return { done: true };
+      const f = frames[this.i++];
+      if (typeof f === "function") {
+        await f();
+        if (signal && signal.aborted) throw gone();
+        return this.read();
+      }
+      return { done: false, value: enc.encode(f) };
+    } }) },
+    // Streaming reads the body as a stream; reaching for text() means the app
+    // took the wrong path.
+    text: async () => { throw new Error("text() on a streamed response"); },
+  };
+};
+const delay = (ms) => new Promise((r) => setTimeout(r, ms));
 // A read or request that never delivers: pending until the app cuts it off,
 // then failing the way an aborted fetch does.
 const abortsWith = (signal) => new Promise((_, reject) => {
@@ -152,6 +164,10 @@ const gDelta = (text) => frame({ candidates: [{ content: { parts: [{ text }] } }
 const oDelta = (content) => frame({ choices: [{ delta: { content } }] });
 // The status line under each pending entry, top to bottom.
 const pendMeta = (h) => h.els["pending"].children.map((li) => li.children[0].children[1].textContent);
+// The first item of the only day, for the tests that log exactly one thing.
+// Empty rather than absent when nothing was written, so a test that expected
+// an item reports the miss instead of throwing and taking the rest with it.
+const only = (h) => (Object.values(days(h))[0] || [])[0] || {};
 
 // Long enough for the app's own promises to run out. A test waiting on one of
 // its timers passes the wait it needs.
@@ -890,7 +906,7 @@ const baseStore = () => ({ "protein.apiKey": "sk-test", "protein.provider": "ant
     await settle();
     check("streaming was asked for", sentBody.stream === true, sentBody);
     check("still queued while streaming", q(h).length === 1, q(h));
-    check("finished item previewed", /estimating… Fried eggs 25 g/.test(pendMeta(h)[0]), pendMeta(h));
+    check("finished item previewed", /estimating…\nFried eggs 25 g/.test(pendMeta(h)[0]), pendMeta(h));
     check("unfinished item is not", !/Bauernbrot/.test(pendMeta(h)[0]), pendMeta(h));
     // The preview follows the metric switch like every other number on screen.
     h.els["metric-calories"].click();
@@ -1011,6 +1027,94 @@ const baseStore = () => ({ "protein.apiKey": "sk-test", "protein.provider": "ant
     await settle();
     check("no day entry written", Object.keys(days(h)).length === 0, days(h));
     check("no progress left behind", Object.keys(h.ctx.streamProgress).length === 0, h.ctx.streamProgress);
+  }
+
+  // ---- 33. a stream can talk without ever answering — pings restart the stall
+  //          clock forever, so the whole-request clock is what has to end it
+  {
+    console.log("33. endless keep-alive stream");
+    const ping = frame({ type: "ping" });
+    const frames = [];
+    for (let i = 0; i < 60; i++) frames.push(() => delay(5), ping);
+    const h = makeHarness({
+      store: baseStore(),
+      fetchImpl: async (url, init) => sse(frames, init.signal),
+    });
+    h.ctx.REQUEST_MS = 60;
+    h.ctx.STALL_MS = 500;  // never the one that fires: a ping keeps restarting it
+    h.els["food-input"].value = "4 eggs";
+    h.els["log-btn"].click();
+    await settle(200);
+    check("cut off by the whole-request clock", q(h).length === 1 && q(h)[0].attempts === 1, q(h));
+    check("named as the wait that ran out", /No answer/.test(q(h)[0].error), q(h)[0].error);
+    check("stall not blamed for it", !/stalled/.test(q(h)[0].error), q(h)[0].error);
+    // The leak this guards: a send that never settles holds its slot forever,
+    // and three of them stop the queue.
+    check("the in-flight slot came back", Object.keys(h.ctx.sending).length === 0, h.ctx.sending);
+  }
+
+  // ---- 34. a provider that ignored the stream flag answered anyway; the
+  //          bytes are paid for either way
+  {
+    console.log("34. plain answer to a streamed request");
+    const plain = JSON.stringify({
+      content: [{ type: "text", text: JSON.stringify([{ name: "Eggs", amount: "4", protein_g: 25, certainty: "high", calories_kcal: 360, calorie_certainty: "high" }]) }],
+    });
+    const h = makeHarness({ store: baseStore(), fetchImpl: async () => sse([plain]) });
+    h.els["food-input"].value = "4 eggs";
+    h.els["log-btn"].click();
+    await settle();
+    check("read as the plain body it is", only(h).protein === 25, days(h));
+    check("queue drained", q(h).length === 0, q(h));
+  }
+
+  // ---- 35. the last frame need not be newline-terminated to count
+  {
+    console.log("35. unterminated final frame");
+    const one = aDelta('[{"name":"Eggs","amount":"4","protein_g":25,"certainty":"high","calories_kcal":360,"calorie_certainty":"high"}]');
+    const h = makeHarness({
+      store: baseStore(),
+      fetchImpl: async () => sse([one.replace(/\n+$/, "")]),
+    });
+    h.els["food-input"].value = "4 eggs";
+    h.els["log-btn"].click();
+    await settle();
+    check("last frame still read", only(h).protein === 25, days(h));
+  }
+
+  // ---- 36. "data: null" parses to a chunk that is not one
+  {
+    console.log("36. null chunk");
+    const h = makeHarness({
+      store: baseStore(),
+      fetchImpl: async () => sse([
+        "data: null\n\n",
+        aDelta('[{"name":"Eggs","amount":"4","protein_g":25,"certainty":"high","calories_kcal":360,"calorie_certainty":"high"}]'),
+      ]),
+    });
+    h.els["food-input"].value = "4 eggs";
+    h.els["log-btn"].click();
+    await settle();
+    check("survived it and read the answer", only(h).protein === 25, days(h));
+    check("no failure recorded", q(h).length === 0, q(h));
+  }
+
+  // ---- 37. a refusal can arrive after the 200 that opened the stream
+  {
+    console.log("37. mid-stream provider error");
+    const h = makeHarness({
+      store: baseStore(),
+      fetchImpl: async () => sse([
+        aDelta('[{"name":"Eg'),
+        frame({ type: "error", error: { type: "overloaded_error", message: "Overloaded" } }),
+      ]),
+    });
+    h.els["food-input"].value = "4 eggs";
+    h.els["log-btn"].click();
+    await settle();
+    check("provider's words shown", /Overloaded/.test(q(h)[0].error), q(h)[0].error);
+    check("not the half-written array", !/Model did not return JSON/.test(q(h)[0].error), q(h)[0].error);
+    check("retryable", q(h)[0].parked === false && q(h)[0].attempts === 1, q(h)[0]);
   }
 
   console.log("\n" + pass + " passed, " + fail + " failed");

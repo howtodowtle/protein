@@ -912,14 +912,14 @@ function apiError(msg, retry) {
 // a suspended app can leave one open for good. Without this the queue waits on
 // that one request forever — no browser applies a timeout of its own. Two
 // deadlines, because a stream changes what "silent" means:
-//   REQUEST_MS — the wait for the first byte of the answer (and, where the
-//     response cannot be read as a stream, for all of it). Generous, because a
+//   REQUEST_MS — the whole request, from asking to done. Generous, because a
 //     thinking model can be genuinely byteless before its first token — Gemini
-//     does not stream its thoughts.
-//   STALL_MS — once bytes flow, the gap that means the stream is dead. Anthropic
-//     thinking deltas and pings are bytes on the wire like any other, so a model
-//     visibly thinking is never "silent" here. A stream that keeps trickling is
-//     bounded by max_tokens, not by us.
+//     does not stream its thoughts. Nothing extends it: a stream that keeps
+//     making noise without ever finishing has to end somewhere too.
+//   STALL_MS — once bytes flow, the gap that means the stream is dead, restarted
+//     by every arrival. Anthropic thinking deltas and pings are bytes on the
+//     wire like any other, so a model visibly thinking is never "silent" here —
+//     which is exactly why it cannot be the only clock.
 var REQUEST_MS = 60000;
 var STALL_MS = 25000;
 
@@ -946,7 +946,7 @@ function scanObjects(text) {
   return out;
 }
 
-// Reads an SSE response to its end and returns the text the model produced.
+// Reads an SSE response to its end.
 // All four providers frame streaming the same way — "data: {json}" lines,
 // blank-line separated, three wire formats between them — and differ only in
 // where the text sits inside a chunk, which is delta(). kick() is called on
@@ -954,30 +954,47 @@ function scanObjects(text) {
 // prove the provider is still there. Deltas are concatenated bare — the "\n"
 // extract() puts between blocks cannot matter for an answer the prompt
 // requires to be one raw JSON array.
+// Returns { text, body, error }: the answer, the raw bytes it was framed out
+// of, and anything the provider said went wrong after it had already answered
+// 200. The body comes back too because a provider that ignored the stream
+// flag sends one plain answer and no data: lines at all — bytes we paid for,
+// which the caller can still read the ordinary way.
 async function readStreamText(res, delta, onText, kick) {
   var reader = res.body.getReader();
   var dec = new TextDecoder();
-  var buf = "", acc = "";
+  var body = "", from = 0, acc = "", said = "";
+  // One line, framed out of the body as it grows. `from` is how much has been
+  // framed already, so the raw bytes stay whole behind it.
+  function take(end) {
+    var line = body.slice(from, end);
+    from = end + 1;
+    if (line.slice(0, 5) !== "data:") return;
+    var chunk = null;
+    // Everything a data: line can hold that is not a chunk — a blank
+    // keep-alive, OpenAI's "[DONE]" farewell, a frame split by a proxy —
+    // falls out here, so no provider's way of saying goodbye needs naming.
+    // JSON.parse eats the leading space and any trailing CR itself, and a
+    // bare "null" parses to one, which is why the shape is checked too.
+    try { chunk = JSON.parse(line.slice(5)); } catch (e) { return; }
+    if (!chunk || typeof chunk !== "object") return;
+    // A refusal can also arrive here, long after the 200 that opened the
+    // stream. All three formats put it in the same place, so keeping the
+    // words costs nothing and saves the caller guessing from a half-written
+    // array why the answer stopped.
+    if (chunk.error) said = chunk.error.message || said;
+    var piece = delta(chunk);
+    if (piece) { acc += piece; onText(acc); }
+  }
   for (;;) {
     var step = await reader.read();
     if (step.done) break;
     kick();
-    buf += dec.decode(step.value, { stream: true });
-    var lines = buf.split("\n");
-    buf = lines.pop(); // an unterminated last line waits for its next chunk
-    for (var i = 0; i < lines.length; i++) {
-      if (lines[i].slice(0, 5) !== "data:") continue;
-      var chunk = null;
-      // Everything a data: line can hold that is not a chunk — a blank
-      // keep-alive, OpenAI's "[DONE]" farewell, a frame split by a proxy —
-      // falls out here, so no provider's way of saying goodbye needs naming.
-      // JSON.parse eats the leading space and any trailing CR itself.
-      try { chunk = JSON.parse(lines[i].slice(5)); } catch (e) { continue; }
-      var piece = delta(chunk);
-      if (piece) { acc += piece; onText(acc); }
-    }
+    body += dec.decode(step.value, { stream: true });
+    for (var nl = body.indexOf("\n", from); nl >= 0; nl = body.indexOf("\n", from)) take(nl);
   }
-  return acc;
+  body += dec.decode();                       // a character split across chunks
+  if (from < body.length) take(body.length);  // a last line with no newline
+  return { text: acc, body: body, error: said };
 }
 
 // One tolerant read of a whole, non-streamed body: the text as it came, and
@@ -1022,28 +1039,34 @@ async function parseFood(text, onItems) {
   var p = PROVIDERS[id];
   // Streaming is asked for only when this browser can actually read a stream —
   // the flag changes what the server sends back, so it is never requested on
-  // faith and left unreadable — and only from a provider that brought a
-  // delta() to read the chunks with.
+  // faith and left unreadable — only from a provider that brought a delta() to
+  // read the chunks with, and only where a request can still be called off:
+  // reading an answer we have no way to stop waiting for is the one thing
+  // worse than not streaming it.
   var wantStream = typeof ReadableStream !== "undefined" &&
-                   typeof TextDecoder !== "undefined" && !!p.delta;
+                   typeof TextDecoder !== "undefined" &&
+                   typeof AbortController !== "undefined" && !!p.delta;
   var req = p.request(apiKey(id), modelFor(id), PARSE_PROMPT + JSON.stringify(text), optsFor(id), wantStream);
 
-  // One clock for both waits: armed for the whole-answer deadline before the
-  // request goes out, re-armed for the shorter stall gap by every chunk that
-  // arrives. Firing aborts the request and keeps which wait ran out — a plain
-  // abort throws AbortError, and the error shown should say what actually
-  // happened, not just that something was cut off.
+  // Two clocks, and the request ends when either runs out.
+  //   whole — the one deadline on the request from end to end, armed here and
+  //     never extended. A stream that keeps saying something without ever
+  //     finishing is still a request that has to end, and pings and reasoning
+  //     deltas are exactly that kind of something.
+  //   stall — the shorter question, asked only once bytes are flowing: has
+  //     anything at all arrived lately. Restarted by every arrival.
+  // Which one fired is remembered by name, not by its length, so two waits set
+  // to the same number could still not be mistaken for each other.
   var ctrl = typeof AbortController !== "undefined" ? new AbortController() : null;
-  var timer = null, timedOut = 0;
-  function arm(ms) {
+  var whole = null, stall = null, timedOut = "";
+  function cutOff(why) { timedOut = why; ctrl.abort(); }
+  function armStall() {
     if (!ctrl) return;
-    if (timer) clearTimeout(timer);
-    timer = setTimeout(function () { timedOut = ms; ctrl.abort(); }, ms);
+    if (stall) clearTimeout(stall);
+    stall = setTimeout(function () { cutOff("stall"); }, STALL_MS);
   }
-  // The words for the deadline that actually fired — timedOut remembers which,
-  // so a first byte that never came is never reported as a mid-stream stall.
   function timeoutErr() {
-    return timedOut === STALL_MS
+    return timedOut === "stall"
       ? apiError(p.host + " stalled — nothing arrived for " +
           Math.round(STALL_MS / 1000) + "s.", "soft")
       : apiError("No answer from " + p.host + " after " +
@@ -1051,7 +1074,7 @@ async function parseFood(text, onItems) {
   }
 
   try {
-    arm(REQUEST_MS);
+    if (ctrl) whole = setTimeout(function () { cutOff("whole"); }, REQUEST_MS);
     var res;
     try {
       res = await fetch(req.url, {
@@ -1096,22 +1119,39 @@ async function parseFood(text, onItems) {
         var objs = scanObjects(acc);
         if (objs.length > seen) { seen = objs.length; onItems(modelItems(objs)); }
       };
+      var out;
       try {
-        raw = await readStreamText(res, p.delta, onText, function () { arm(STALL_MS); });
+        out = await readStreamText(res, p.delta, onText, armStall);
       } catch (e) {
         // Headers made it here, so a death now is the transfer dying under us,
-        // not the provider saying no — either way worth another go.
+        // not the provider saying no — either way worth another go. Whatever
+        // it was, nobody is reading this response any more: let go of it here
+        // rather than leave it open with no clock left to close it.
+        if (ctrl) ctrl.abort();
         throw timedOut ? timeoutErr()
           : apiError("Connection to " + p.host + " dropped mid-answer.", "soft");
+      }
+      // A refusal that arrived mid-stream is the reason the answer stopped,
+      // whether it stopped at nothing or at half an array, and it is worth
+      // more than the half — "Overloaded" can be waited out, a truncated
+      // array read back at the user cannot.
+      if (out.error) throw apiError(p.host + ": " + out.error, "soft");
+      raw = out.text;
+      if (!raw) {
+        // Nothing framed as an answer, and no complaint either: the provider
+        // ignored the stream flag and sent one plain body. Still an answer,
+        // still one we paid for — read it the way the text path would.
+        fullText = out.body;
+        try { raw = p.extract(JSON.parse(out.body)); } catch (e) { raw = ""; }
       }
     } else {
       // No readable stream — an old browser, or a response with no body to
       // read as one. One read of the whole answer, under the whole-answer
       // deadline, as it always was.
-      var whole = await readBody(res);
+      var plain = await readBody(res);
       if (timedOut) throw timeoutErr();
-      fullText = whole.text;
-      raw = p.extract(whole.json || {});
+      fullText = plain.text;
+      raw = p.extract(plain.json || {});
     }
 
     var clean = raw.replace(/```json|```/g, "").trim();
@@ -1128,8 +1168,9 @@ async function parseFood(text, onItems) {
 
     return modelItems(arr);
   } finally {
-    // Whichever way this ended, the clock must not fire into a later request.
-    if (timer) clearTimeout(timer);
+    // Whichever way this ended, neither clock may fire into a later request.
+    if (whole) clearTimeout(whole);
+    if (stall) clearTimeout(stall);
   }
 }
 
@@ -1576,12 +1617,15 @@ function pendingStatus(e) {
   if (sending[e.id]) {
     // What the stream has finished so far, read in the metric on screen. The
     // items came through the same mapping the committed ones will, so the
-    // preview never shows a figure the day won't.
+    // preview never shows a figure the day won't. It gets its own line, below
+    // the day: the foods are separated from each other by the same mark that
+    // would otherwise separate the last of them from the date, and "for
+    // 2026-08-09" reads far too much like one more thing eaten.
     var m = METRICS[viewMetric];
     var live = (streamProgress[e.id] || []).map(function (x) {
       return x.name + " " + x[m.field] + " " + m.unit;
     }).join(" · ");
-    return "estimating…" + (live ? " " + live : "") + day;
+    return "estimating…" + day + (live ? "\n" + live : "");
   }
   if (e.parked) return e.error || "Failed.";
   if (!apiKey()) return "waiting for an API key" + day;

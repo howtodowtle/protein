@@ -162,6 +162,8 @@ const frame = (chunk) => "data: " + JSON.stringify(chunk) + "\n\n";
 const aDelta = (text) => frame({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text } });
 const gDelta = (text) => frame({ candidates: [{ content: { parts: [{ text }] } }] });
 const oDelta = (content) => frame({ choices: [{ delta: { content } }] });
+// A reasoning model thinks out loud in chunks that carry no answer text at all.
+const oReason = (reasoning_content) => frame({ choices: [{ delta: { reasoning_content, content: null } }] });
 // The chunk that ends an openai-compatible stream carries no text, only the
 // reason it is the last one.
 const oFinish = (reason) => frame({ choices: [{ delta: {}, finish_reason: reason }] });
@@ -1132,8 +1134,10 @@ const dsStore = () => ({ "protein.provider": "deepseek", "protein.apiKey.deepsee
     check("retryable", q(h)[0].parked === false && q(h)[0].attempts === 1, q(h)[0]);
   }
 
-  // ---- 38. an answer that stopped for room, read the ordinary way. The half
-  //          it managed is not the point: what it says is that there is more.
+  // ---- 38. an answer that stopped for room, read the ordinary way. There is
+  //          text before the cut, so the model was writing the array and outgrew
+  //          it — nothing a second ask can shorten, and turning thinking off
+  //          would only hand the same answer a smaller ceiling.
   {
     console.log("38. truncated whole body, no stream");
     let calls = 0;
@@ -1148,10 +1152,10 @@ const dsStore = () => ({ "protein.provider": "deepseek", "protein.apiKey.deepsee
     check("named as the ceiling it was", /ran out of room/.test(q(h)[0].error), q(h)[0].error);
     check("not blamed on the model's writing", !/Model did not return JSON/.test(q(h)[0].error), q(h)[0].error);
     check("nothing written from half an answer", Object.keys(days(h)).length === 0, days(h));
-    // Thinking is on its provider default here, which may well be thinking, so
-    // there is one thing left to try — and after that nothing, rather than the
-    // three tries a soft failure would have bought at the same ceiling.
-    check("downgraded once and stopped there", calls === 2, calls);
+    check("told what to do about it", /fewer foods/.test(q(h)[0].error), q(h)[0].error);
+    // Not one wasted ask: the three a soft failure would have bought, and not
+    // even the one a downgrade buys — there is nothing here left to turn off.
+    check("asked once and no more", calls === 1, calls);
     check("parked", q(h)[0].parked === true, q(h)[0]);
   }
 
@@ -1173,7 +1177,37 @@ const dsStore = () => ({ "protein.provider": "deepseek", "protein.apiKey.deepsee
     check("no progress left behind", Object.keys(h.ctx.streamProgress).length === 0, h.ctx.streamProgress);
   }
 
-  // ---- 40. the reported bug, whole: thinking on, the budget spent entirely on
+  // ---- 40. the same news again, but from a stream that said nothing else. A
+  //          reasoning model streams its thinking as content-less chunks, so a
+  //          budget spent entirely on thinking arrives as an answer of no text
+  //          at all — and the only thing distinguishing it from a provider that
+  //          ignored the stream flag is that the frames were real.
+  {
+    console.log("40. a stream of nothing but thinking");
+    const bodies = [];
+    const h = makeHarness({
+      store: { ...dsStore(), "protein.thinking.deepseek": "on" },
+      fetchImpl: async (url, init) => {
+        bodies.push(JSON.parse(init.body));
+        return sse(bodies.length === 1
+          ? [oReason("Need estimate each. "), oReason("Wait rule says ~10g. "), oFinish("length"), "data: [DONE]\n\n"]
+          : [oDelta('[{"name":"Eggs","amount":"4","protein_g":25,"certainty":"high","calories_kcal":360,"calorie_certainty":"high"}]')]);
+      },
+    });
+    h.ctx.RETRY_MS[0] = 60;   // long enough to still be waiting at the first checks
+    h.els["food-input"].value = "4 eggs";
+    h.els["log-btn"].click();
+    await settle();
+    check("read as the ceiling, not as a model with nothing to say",
+      /spent its whole token budget thinking/.test(q(h)[0].error), q(h)[0].error);
+    check("not one word of the trace", !/Wait rule says/.test(q(h)[0].error), q(h)[0].error);
+    check("marked for the try without thinking", q(h)[0].noThink === true, q(h)[0]);
+    await settle(120);
+    check("which went out without it", bodies[1] && bodies[1].thinking.type === "disabled", bodies[1]);
+    check("and landed", only(h).protein === 25, days(h));
+  }
+
+  // ---- 41. the reported bug, whole: thinking on, the budget spent entirely on
   //          thinking, and the answer never started. The body comes back as one
   //          plain object to a streamed request, which is the route that hid it.
   //          Both halves are one run — what the user is told, and what the app
@@ -1181,7 +1215,7 @@ const dsStore = () => ({ "protein.provider": "deepseek", "protein.apiKey.deepsee
   //          first: the row promises a try without thinking, so the request that
   //          follows had better be one.
   {
-    console.log("40. all of the budget spent thinking");
+    console.log("41. all of the budget spent thinking");
     const trace = "We need answer as JSON array. Wait rule says a bit is ~10g. ".repeat(60);
     const bodies = [];
     const h = makeHarness({
@@ -1215,10 +1249,10 @@ const dsStore = () => ({ "protein.provider": "deepseek", "protein.apiKey.deepsee
     check("queue drained", q(h).length === 0, q(h));
   }
 
-  // ---- 41. a second ceiling means the answer is the long thing, not the
+  // ---- 42. a second ceiling means the answer is the long thing, not the
   //          thinking — and there is nothing left to turn off
   {
-    console.log("41. truncated again without thinking");
+    console.log("42. truncated again without thinking");
     let calls = 0;
     const h = makeHarness({
       store: { ...dsStore(), "protein.thinking.deepseek": "on" },
@@ -1231,15 +1265,47 @@ const dsStore = () => ({ "protein.provider": "deepseek", "protein.apiKey.deepsee
     check("tried twice and no more", calls === 2, calls);
     check("parked", q(h)[0].parked === true, q(h)[0]);
     check("told what to do about it", /fewer foods/.test(q(h)[0].error), q(h)[0].error);
-    // A downgrade outlives the retry list, so the step it waits for is the last
-    // one rather than a step off the end of it.
-    check("no timer built from a missing step", !/NaN/.test(String(q(h)[0].error)), q(h)[0].error);
   }
 
-  // ---- 42. a model that thought and then said nothing, having stopped of its
+  // ---- 43. a downgrade earns a try the retry list did not budget for, so the
+  //          step it waits on is the last one rather than one off the end.
+  //          A step off the end is `undefined`, and now + undefined is NaN —
+  //          which mark() reads as no cooldown at all and deletes, so the entry
+  //          does not hang, it goes straight back out with no wait. That is the
+  //          difference this measures: the try still happens either way, so the
+  //          only thing that tells the two apart is whether it waited.
+  {
+    console.log("43. a downgrade past the end of the retry list");
+    let calls = 0;
+    const h = makeHarness({
+      store: { ...dsStore(), "protein.thinking.deepseek": "on" },
+      fetchImpl: async () => {
+        calls++;
+        // Two soft failures first, so the truncation lands on attempt 3 — one
+        // past the last step the list holds.
+        return calls <= 2 ? httpErr(503, "overloaded") : sse([oWhole({ finish: "length" })]);
+      },
+    });
+    h.ctx.RETRY_MS[0] = 5;
+    h.ctx.RETRY_MS[1] = 120;
+    h.els["food-input"].value = "4 eggs";
+    h.els["log-btn"].click();
+    // Two 503s and the truncation are through by ~125ms; the downgraded try is
+    // one more 120ms step after that. Here, in between.
+    await settle(180);
+    check("the truncation landed past the last step", q(h)[0].attempts === 3, q(h)[0]);
+    check("and bought a try the list had no step for", q(h)[0].noThink === true, q(h)[0]);
+    check("which waits its turn rather than going out at once", calls === 3, calls);
+    check("on a moment that actually arrives", Number.isFinite(h.ctx.cooling[q(h)[0].id]),
+      h.ctx.cooling);
+    await settle(160);
+    check("and then goes, and parks", calls === 4 && q(h)[0].parked === true, q(h)[0]);
+  }
+
+  // ---- 44. a model that thought and then said nothing, having stopped of its
   //          own accord: a whim, not a ceiling, and worth one more ask
   {
-    console.log("42. reasoning and no answer");
+    console.log("44. reasoning and no answer");
     let calls = 0;
     const h = makeHarness({
       store: dsStore(),
@@ -1261,9 +1327,9 @@ const dsStore = () => ({ "protein.provider": "deepseek", "protein.apiKey.deepsee
     check("and the retry landed", only(h).protein === 25, days(h));
   }
 
-  // ---- 43. a model that simply wrote prose still says so in one line
+  // ---- 45. a model that simply wrote prose still says so in one line
   {
-    console.log("43. long garbage is cut to a line");
+    console.log("45. long garbage is cut to a line");
     const h = makeHarness({
       streamCapable: false, store: baseStore(),
       fetchImpl: async () => aWhole("Here is the JSON array you asked for.\n".repeat(150)),
@@ -1278,11 +1344,11 @@ const dsStore = () => ({ "protein.provider": "deepseek", "protein.apiKey.deepsee
     check("no newlines of its own", !/\n/.test(err), err);
   }
 
-  // ---- 44. the budget the request actually carries, which is the whole bug:
+  // ---- 46. the budget the request actually carries, which is the whole bug:
   //          a model left on its provider's default reasons anyway, so the
   //          default gets the room too
   {
-    console.log("44. the budget on the wire");
+    console.log("46. the budget on the wire");
     // What one request put on the wire, for a store and the wire format that
     // store speaks. The answer is empty because nothing here reads it.
     const sentFor = async (store, delta = oDelta) => {
@@ -1301,12 +1367,21 @@ const dsStore = () => ({ "protein.provider": "deepseek", "protein.apiKey.deepsee
     const on = await sentFor({ ...dsStore(), "protein.thinking.deepseek": "on" });
     const byDefault = await sentFor(dsStore());
     const off = await sentFor({ ...dsStore(), "protein.thinking.deepseek": "off" });
-    const gem = await sentFor({ "protein.provider": "gemini", "protein.apiKey.gemini": "AIza" }, gDelta);
+    const gemStore = { "protein.provider": "gemini", "protein.apiKey.gemini": "AIza" };
+    const gem = await sentFor(gemStore, gDelta);
+    // An effort set alongside an explicit "off" used to win, which turned the
+    // thinking back on and then gave it an answer-sized ceiling to do it in —
+    // the exact shape of the bug this file is mostly about.
+    const gemOffWithEffort = await sentFor(
+      { ...gemStore, "protein.thinking.gemini": "off", "protein.effort.gemini": "high" }, gDelta);
     check("thinking on gets room to think", on.max_tokens === 8000, on.max_tokens);
     check("so does the provider default", byDefault.max_tokens === 8000, byDefault.max_tokens);
     check("thinking off gets room to answer", off.max_tokens === 2000, off.max_tokens);
     check("and gemini says the same in its own words",
       gem.generationConfig.maxOutputTokens === 8000, gem.generationConfig);
+    check("an effort cannot turn thinking back on",
+      gemOffWithEffort.generationConfig.thinkingConfig.thinkingBudget === 0,
+      gemOffWithEffort.generationConfig);
   }
 
   console.log("\n" + pass + " passed, " + fail + " failed");

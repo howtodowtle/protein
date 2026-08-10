@@ -501,8 +501,10 @@
 // closes a stream say it in the same place, so one function reads either.
 
 // Room for the answer and — where the provider charges thinking against the same
-// ceiling, which every reasoning model here does — for the thinking that comes
-// first. Bounded from both sides, which leaves one number rather than one per
+// ceiling, which some do and some do not, and which of the two a given model is
+// is not something the app can ask — for the thinking that comes first. A model
+// that keeps its reasoning off this budget simply never needs the extra room.
+// Bounded from both sides, which leaves one number rather than one per
 // provider: it has to clear what the thinking actually costs, and 4000 did not
 // (a model spent every one of them deliberating and had none left to answer
 // with), and it has to fit under the lowest output ceiling of the four, which is
@@ -627,8 +629,11 @@ var PROVIDERS = {
       // thinkingBudget: 0 disables, -1 lets the model decide.
       if (opts.thinking === "off") cfg.thinkingConfig = { thinkingBudget: 0 };
       // Gemini 3+ calls the effort dial thinkingLevel; the value is sent verbatim.
-      // thinkingLevel and thinkingBudget are mutually exclusive, so effort wins.
-      if (opts.effort) cfg.thinkingConfig = { thinkingLevel: opts.effort };
+      // thinkingLevel and thinkingBudget are mutually exclusive, so effort wins —
+      // but not over an explicit "off", which used to be overwritten here and set
+      // a model thinking against a budget sized for an answer alone. How much to
+      // think cannot outrank whether to.
+      if (opts.effort && opts.thinking !== "off") cfg.thinkingConfig = { thinkingLevel: opts.effort };
       else if (opts.thinking === "on") cfg.thinkingConfig = { thinkingBudget: -1 };
       return {
         url: "https://generativelanguage.googleapis.com/v1beta/models/" +
@@ -815,7 +820,8 @@ var viewMetric = loadMetric();
 // ---------- queue ----------
 // Every submission lands here first and is only removed once it has been parsed
 // and written into a day. One code path online and off, and nothing is lost if
-// the tab dies mid-request. Entry: {id, text, date, createdAt, attempts, error, parked}.
+// the tab dies mid-request.
+// Entry: {id, text, date, createdAt, attempts, error, parked, noThink}.
 function loadQueue() { return loadJSON(KEY_QUEUE, [], Array.isArray); }
 function saveQueue(q) { return saveJSON(KEY_QUEUE, q); }
 function updateQueue(fn) {
@@ -978,7 +984,14 @@ var THINKING_FIELD = /"(reasoning_content|reasoning|thinking|thought)"\s*:/;
 // on the try without thinking, thought is already false and the class is already
 // terminal, so the once-only rule needs saying nowhere else. What happens next is
 // the row's to say, so the words here stop at what happened.
-function cutOffError(p, clean, thought) {
+// Only one of the two truncations is worth another try, and the answer already
+// says which: text before the cut means the model was writing the array and
+// outgrew the room, and turning thinking off cannot shorten an answer — it only
+// hands the same answer a smaller ceiling, since a request that does not think
+// is capped at what one array needs. Nothing before the cut means the thinking
+// took it all, and that is the one thing there is left to turn off.
+function cutOffError(p, clean, thinkingOn) {
+  var thought = !clean && thinkingOn;
   return apiError(p.host + (clean
       ? " ran out of room mid-answer."
       : " spent its whole token budget thinking and never answered.") +
@@ -1198,7 +1211,9 @@ async function parseFood(text, onItems, noThink) {
     // asked for, so the status is settled before anything touches the stream.
     if (!res.ok) {
       var body = await readBody(res);
-      // Surface whatever the provider said, verbatim — never swallow or reinterpret it.
+      // Surface whatever the provider said, in its own words and never
+      // reinterpreted — cut only to what one row can hold, since a 5xx is as
+      // likely to be an HTML error page as a sentence.
       var msg = (body.json && body.json.error && (body.json.error.message || body.json.error)) ||
                 (body.json && body.json.message) || body.text || "no response body";
       if (typeof msg !== "string") msg = JSON.stringify(msg);
@@ -1251,7 +1266,11 @@ async function parseFood(text, onItems, noThink) {
         try { parsed = JSON.parse(out.body); } catch (e) {}
         read = readWhole(p, parsed);
         raw = read.raw;
-        cut = read.cut;
+        // The stream's own word stands if it had one. A body that would not parse
+        // is not a body saying the answer was finished — and a reasoning model
+        // that streamed nothing but thinking arrives here every time, with the
+        // one thing worth knowing already framed out of its last chunk.
+        cut = cut || read.cut;
       }
     } else {
       // No readable stream — an old browser, or a response with no body to

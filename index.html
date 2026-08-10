@@ -427,7 +427,7 @@
     </div>
     <p id="settings-note"></p>
     <!-- The deploy rewrites this line (.github/workflows/stamp.yml); "dev" means it never went through one. -->
-    <p id="build-stamp">Build b5edec4 · 2026-08-10</p>
+    <p id="build-stamp">Build 5e8c25e · 2026-08-10</p>
   </section>
 
   <section class="total-section">
@@ -532,23 +532,45 @@
 // no data: prefix — into its own image block shape when one is given;
 // delta() is the streaming half of extract() — the visible text one SSE chunk
 // carries, "" for a chunk that carries none (pings, reasoning, stops).
-var THINKING_BUDGET = 4000; // room for reasoning tokens when thinking is on
-// A photographed plate holds more items than a typed line tends to, and an
-// answer cut off mid-array fails as non-JSON — then retries identically, and
-// is cut off identically. A cap is only a ceiling, so the room costs nothing
-// on the answers that never need it.
-var PHOTO_TOKENS = 1000;
+// truncated() is the reading that tells an answer cut short from a finished one:
+// the provider's own word for why it stopped. A whole body and the chunk that
+// closes a stream say it in the same place, so one function reads either.
+
+// Room for the answer and, where the provider charges thinking against the same
+// ceiling, for the thinking that comes first. A model that keeps its reasoning
+// off this budget simply never needs the extra room, so it is sized for the ones
+// that do. Bounded from both sides, which leaves one number rather than one per
+// provider: it has to clear what the thinking actually costs, and 4000 did not
+// (a model spent every one of them deliberating and had none left to answer
+// with), and it has to stay under the lowest output ceiling of the models this
+// app asks for, every one of which is 64k or more. Nothing is charged for room
+// left unused, so the number leans generous: the only thing this ceiling should
+// ever stop is a model that has lost the thread entirely — and note that at
+// typical speeds REQUEST_MS, not this, is what ends such a request first.
+var THINKING_BUDGET = 16000;
+// Thinking off: the array is all that is coming. Seven items at six fields each is
+// ~400 tokens, so the 500 this replaces was one long dinner from cutting itself off.
+var ANSWER_BUDGET = 2000;
+
+// Only an explicit "off" is known not to think. A provider default is whatever
+// the model does unprompted, and on a reasoning model that is thinking — so the
+// default gets the room too, rather than the answer-sized cap it used to. Asked
+// in one place because two wire formats spell the field differently and would
+// otherwise be two ternaries that have to agree.
+function maxTokens(opts) {
+  return opts.thinking === "off" ? ANSWER_BUDGET : THINKING_BUDGET;
+}
 
 // The messages-shaped body Anthropic and the OpenAI-compatible providers agree on.
 // Only the "thinking on" type string and where effort lands actually differ, so
 // those get layered on by the caller. content is the prompt string, or the
-// provider's own block array when a photo rides along — an array is what a
-// photo request looks like, which is what sizes the cap.
+// provider's own block array when a photo rides along — the budget above is the
+// same either way, since what a photographed plate costs is more items in the
+// answer, and that is what the answer budget is already sized for.
 function chatBody(model, content, opts, stream) {
   var body = {
     model: model,
-    max_tokens: opts.thinking === "on" ? THINKING_BUDGET
-      : Array.isArray(content) ? PHOTO_TOKENS : 500,
+    max_tokens: maxTokens(opts),
     messages: [{ role: "user", content: content }]
   };
   if (opts.thinking === "off") body.thinking = { type: "disabled" };
@@ -593,13 +615,22 @@ var PROVIDERS = {
     delta: function (c) {
       return c.type === "content_block_delta" && c.delta && typeof c.delta.text === "string"
         ? c.delta.text : "";
+    },
+    // Said twice: on the whole message, and on the message_delta that closes a
+    // stream. Same word, two places, so one reading answers for both.
+    truncated: function (d) {
+      return (d.stop_reason || (d.delta && d.delta.stop_reason)) === "max_tokens";
     }
   },
 
   deepseek: {
     label: "DeepSeek",
     host: "api.deepseek.com",
-    model: "deepseek-chat",
+    // The current model, and the one with the headroom: deepseek-chat is the
+    // older one and caps max_tokens at 8k, under THINKING_BUDGET, so asking for
+    // it would 400 every request the moment thinking was anything but off. A
+    // model you set yourself still wins; only an unconfigured provider lands here.
+    model: "deepseek-v4-flash",
     keyHint: "sk-…",
     efforts: ["high", "max"],
     effortNote: "reasoning_effort — only high and max are distinct (low/medium map to high, xhigh to max).",
@@ -607,7 +638,8 @@ var PROVIDERS = {
       return openaiRequest("https://api.deepseek.com/chat/completions", key, model, prompt, opts, stream, image);
     },
     extract: openaiExtract,
-    delta: openaiDelta
+    delta: openaiDelta,
+    truncated: openaiTruncated
   },
 
   kimi: {
@@ -621,7 +653,8 @@ var PROVIDERS = {
       return openaiRequest("https://api.moonshot.ai/v1/chat/completions", key, model, prompt, opts, stream, image);
     },
     extract: openaiExtract,
-    delta: openaiDelta
+    delta: openaiDelta,
+    truncated: openaiTruncated
   },
 
   gemini: {
@@ -634,13 +667,16 @@ var PROVIDERS = {
     request: function (key, model, prompt, opts, stream, image) {
       var cfg = {
         responseMimeType: "application/json",
-        maxOutputTokens: opts.thinking === "off" ? 2000 : THINKING_BUDGET
+        maxOutputTokens: maxTokens(opts)
       };
-      // thinkingBudget: 0 disables, -1 lets the model decide.
+      // thinkingBudget: 0 disables, -1 lets the model decide, and Gemini 3+ calls
+      // the effort dial thinkingLevel — one field, three ways to set it, so one
+      // chain rather than three assignments racing for it. Order is the rule:
+      // effort outranks letting the model decide, but nothing outranks "off",
+      // which is how a set effort used to turn thinking back on and leave it a
+      // budget sized for the answer alone to do it in.
       if (opts.thinking === "off") cfg.thinkingConfig = { thinkingBudget: 0 };
-      // Gemini 3+ calls the effort dial thinkingLevel; the value is sent verbatim.
-      // thinkingLevel and thinkingBudget are mutually exclusive, so effort wins.
-      if (opts.effort) cfg.thinkingConfig = { thinkingLevel: opts.effort };
+      else if (opts.effort) cfg.thinkingConfig = { thinkingLevel: opts.effort };
       else if (opts.thinking === "on") cfg.thinkingConfig = { thinkingBudget: -1 };
       return {
         url: "https://generativelanguage.googleapis.com/v1beta/models/" +
@@ -662,7 +698,8 @@ var PROVIDERS = {
     // A streamed chunk is shaped like a whole generateContent response, just
     // holding less of it. Gemini sends no thinking deltas — with thinking on
     // it is simply silent until the answer itself starts.
-    delta: function (c) { return geminiText(c, ""); }
+    delta: function (c) { return geminiText(c, ""); },
+    truncated: geminiTruncated
   }
 };
 
@@ -710,6 +747,12 @@ function openaiDelta(data) {
   return (choice && choice.delta && typeof choice.delta.content === "string")
     ? choice.delta.content : "";
 }
+// The finish reason sits on the choice either way — beside the message in a whole
+// answer, beside the delta in the chunk that ends a stream.
+function openaiTruncated(data) {
+  var choice = (data.choices || [])[0];
+  return !!choice && choice.finish_reason === "length";
+}
 // Both halves of Gemini's reading share one walk. A whole answer joins its
 // parts the way extract() always has; a streamed chunk joins them bare, since
 // its parts are fragments of one text, not blocks.
@@ -717,6 +760,10 @@ function geminiText(data, sep) {
   var cand = (data.candidates || [])[0];
   var parts = (cand && cand.content && cand.content.parts) || [];
   return parts.map(function (p) { return p.text || ""; }).join(sep);
+}
+function geminiTruncated(data) {
+  var cand = (data.candidates || [])[0];
+  return !!cand && cand.finishReason === "MAX_TOKENS";
 }
 
 var PROVIDER_IDS = Object.keys(PROVIDERS);
@@ -837,9 +884,10 @@ var viewMetric = loadMetric();
 // ---------- queue ----------
 // Every submission lands here first and is only removed once it has been parsed
 // and written into a day. One code path online and off, and nothing is lost if
-// the tab dies mid-request. Entry: {id, text, date, createdAt, attempts, error,
-// parked, image?} — image is {mediaType, data} when a photo was attached, and
-// it rides the entry through storage so a photo survives everything the text does.
+// the tab dies mid-request.
+// Entry: {id, text, date, createdAt, attempts, error, parked, noThink, image?}
+// — image is {mediaType, data} when a photo was attached, and it rides the
+// entry through storage so a photo survives everything the text does.
 function loadQueue() { return loadJSON(KEY_QUEUE, [], Array.isArray); }
 function saveQueue(q) { return saveJSON(KEY_QUEUE, q); }
 function updateQueue(fn) {
@@ -994,25 +1042,67 @@ var PHOTO_TEXT_PROMPT = PARSE_RULES + '\n' + PHOTO_RULES + '\n\nNow do the same 
 //   "soft"     — worth another go later; burns an attempt.
 //   "terminal" — the provider understood us and said no; retrying asks the same
 //                question and gets the same answer.
+//   "downgrade" — terminal as it stands, but there is one setting left to change,
+//                so it is worth asking again with that changed. See cutOffError.
 function apiError(msg, retry) {
   var err = new Error(msg);
   err.retry = retry;
   return err;
 }
 
+// What a failed answer may take up on its way into an error. Enough to recognise
+// what came back, nowhere near enough to paste a reasoning trace into a queue row
+// on a phone. Whitespace collapses with it: a body's newlines are its indentation,
+// and the row already spends its own on "Will retry."
+var ECHO_MAX = 200;
+function snip(s) {
+  s = String(s).replace(/\s+/g, " ").trim();
+  return s.length > ECHO_MAX ? s.slice(0, ECHO_MAX) + "…" : s;
+}
+// The one thing a body holds that is neither answer nor error, named four ways
+// across four providers. Only ever asked whether there was any — never read back
+// as an answer, because a trace is a scratchpad, full of figures the model went
+// on to reject. Half an answer is not shown to you either (see the stream above);
+// a draft of one is worth less than that.
+var THINKING_FIELD = /"(reasoning_content|reasoning|thinking|thought)"\s*:/;
+
+// A cut-off answer is not bad luck — the same request meets the same ceiling and
+// spends it the same way, so asking again unchanged only re-buys what overran.
+// Terminal, therefore, unless something is left to change, and the answer itself
+// says whether anything is: text before the cut means the model was writing the
+// array and outgrew the room, which turning thinking off cannot shorten — it
+// only hands the same answer a smaller ceiling, a request that does not think
+// being capped at what one array needs. Nothing before the cut means the
+// thinking took it all, and that is the one thing there is to turn off.
+// Settled here because this is where the options the request went out with are
+// known: on the try without thinking, thought is already false and the class is
+// already terminal, so the once-only rule needs saying nowhere else. What
+// happens next is the row's to say, so the words here stop at what happened.
+function cutOffError(p, clean, thinkingOn) {
+  var thought = !clean && thinkingOn;
+  return apiError(p.host + (clean
+      ? " ran out of room mid-answer."
+      : " spent its whole token budget thinking and never answered.") +
+    (thought ? "" : " Log fewer foods at once."), thought ? "downgrade" : "terminal");
+}
+
 // A request nobody cuts off can stay open for as long as the phone lets it, and
 // a suspended app can leave one open for good. Without this the queue waits on
 // that one request forever — no browser applies a timeout of its own. Two
 // deadlines, because a stream changes what "silent" means:
-//   REQUEST_MS — the whole request, from asking to done. Generous, because a
-//     thinking model can be genuinely byteless before its first token — Gemini
-//     does not stream its thoughts. Nothing extends it: a stream that keeps
-//     making noise without ever finishing has to end somewhere too.
+//   REQUEST_MS — the whole request, from asking to done. It has to cover a whole
+//     thinking budget and not just a first token: a model given room for
+//     thousands of reasoning tokens can spend minutes on them, and it is the
+//     only clock watching while it does — a thinking model can be genuinely
+//     byteless before its first token, since Gemini does not stream its
+//     thoughts, and the stall clock below is not armed until something arrives.
+//     Nothing extends it: a stream that keeps making noise without ever
+//     finishing has to end somewhere too.
 //   STALL_MS — once bytes flow, the gap that means the stream is dead, restarted
 //     by every arrival. Anthropic thinking deltas and pings are bytes on the
 //     wire like any other, so a model visibly thinking is never "silent" here —
 //     which is exactly why it cannot be the only clock.
-var REQUEST_MS = 60000;
+var REQUEST_MS = 180000;
 var STALL_MS = 25000;
 
 // Finds the completed top-level objects of the JSON array while it is still
@@ -1046,15 +1136,16 @@ function scanObjects(text) {
 // prove the provider is still there. Deltas are concatenated bare — the "\n"
 // extract() puts between blocks cannot matter for an answer the prompt
 // requires to be one raw JSON array.
-// Returns { text, body, error }: the answer, the raw bytes it was framed out
-// of, and anything the provider said went wrong after it had already answered
-// 200. The body comes back too because a provider that ignored the stream
+// Returns { text, body, error, cut }: the answer, the raw bytes it was framed
+// out of, anything the provider said went wrong after it had already answered
+// 200, and whether it stopped because it ran out of room rather than because it
+// was done. The body comes back too because a provider that ignored the stream
 // flag sends one plain answer and no data: lines at all — bytes we paid for,
 // which the caller can still read the ordinary way.
-async function readStreamText(res, delta, onText, kick) {
+async function readStreamText(res, delta, truncated, onText, kick) {
   var reader = res.body.getReader();
   var dec = new TextDecoder();
-  var body = "", from = 0, acc = "", said = "";
+  var body = "", from = 0, acc = "", said = "", cut = false;
   // One line, framed out of the body as it grows. `from` is how much has been
   // framed already, so the raw bytes stay whole behind it.
   function take(end) {
@@ -1074,6 +1165,10 @@ async function readStreamText(res, delta, onText, kick) {
     // words costs nothing and saves the caller guessing from a half-written
     // array why the answer stopped.
     if (chunk.error) said = chunk.error.message || said;
+    // Why it stopped rides in the last chunk, behind the text it cut short.
+    // Remembered, not acted on: this reads a stream to its end, and what a
+    // stopped answer is worth is the caller's question.
+    if (truncated(chunk)) cut = true;
     var piece = delta(chunk);
     if (piece) { acc += piece; onText(acc); }
   }
@@ -1086,7 +1181,7 @@ async function readStreamText(res, delta, onText, kick) {
   }
   body += dec.decode();                       // a character split across chunks
   if (from < body.length) take(body.length);  // a last line with no newline
-  return { text: acc, body: body, error: said };
+  return { text: acc, body: body, error: said, cut: cut };
 }
 
 // One tolerant read of a whole, non-streamed body: the text as it came, and
@@ -1097,6 +1192,14 @@ async function readBody(res) {
   try { b.text = await res.text(); } catch (e) {}
   try { b.json = JSON.parse(b.text); } catch (e) {}
   return b;
+}
+
+// The two readings a whole answer carries, taken together because they are only
+// ever wanted together: what it said, and whether it had finished saying it. Two
+// routes end up here — the plain one, and a provider that ignored the stream flag
+// and sent one body anyway — and they are the same read, so they are one function.
+function readWhole(p, json) {
+  return { raw: json ? p.extract(json) : "", cut: !!json && p.truncated(json) };
 }
 
 // The model's wire items, filtered and mapped into ours — one function for
@@ -1126,9 +1229,18 @@ function modelItems(arr) {
 // item completed so far, put through the same mapping the final answer will
 // get. A report, not a result — the answer this function returns is parsed
 // from the finished text alone.
-async function parseFood(text, image, onItems) {
+// The queue entry is the request: what was typed, the photo if one was
+// attached, and whether a try that ran out of room has asked for this one to go
+// out without reasoning. Taking the entry whole rather than three of its fields
+// is what stops the next thing it carries from becoming a fourth argument.
+// noThink brings effort with it: reasoning_effort beside a disabled thinking is
+// a contradiction, and the whole point of this attempt is that it does not reason.
+async function parseFood(entry, onItems) {
+  var text = entry.text, image = entry.image;
   var id = provider();
   var p = PROVIDERS[id];
+  var opts = optsFor(id);
+  if (entry.noThink) { opts.thinking = "off"; opts.effort = ""; }
   // Streaming is asked for only when this browser can actually read a stream —
   // the flag changes what the server sends back, so it is never requested on
   // faith and left unreadable — only from a provider that brought a delta() to
@@ -1143,7 +1255,7 @@ async function parseFood(text, image, onItems) {
   var prompt = !image ? PARSE_PROMPT + JSON.stringify(text)
     : text ? PHOTO_TEXT_PROMPT + JSON.stringify(text)
     : PHOTO_PROMPT;
-  var req = p.request(apiKey(id), modelFor(id), prompt, optsFor(id), wantStream, image);
+  var req = p.request(apiKey(id), modelFor(id), prompt, opts, wantStream, image);
 
   // Two clocks, and the request ends when either runs out.
   //   whole — the one deadline on the request from end to end, armed here and
@@ -1195,7 +1307,9 @@ async function parseFood(text, image, onItems) {
     // asked for, so the status is settled before anything touches the stream.
     if (!res.ok) {
       var body = await readBody(res);
-      // Surface whatever the provider said, verbatim — never swallow or reinterpret it.
+      // Surface whatever the provider said, in its own words and never
+      // reinterpreted — cut only to what one row can hold, since a 5xx is as
+      // likely to be an HTML error page as a sentence.
       var msg = (body.json && body.json.error && (body.json.error.message || body.json.error)) ||
                 (body.json && body.json.message) || body.text || "no response body";
       if (typeof msg !== "string") msg = JSON.stringify(msg);
@@ -1203,10 +1317,13 @@ async function parseFood(text, image, onItems) {
       // errors are the ones where the same request can still succeed later.
       var soft = res.status < 400 || res.status >= 500 ||
                  res.status === 408 || res.status === 429;
-      throw apiError(p.host + " HTTP " + res.status + ": " + msg, soft ? "soft" : "terminal");
+      throw apiError(p.host + " HTTP " + res.status + ": " + snip(msg), soft ? "soft" : "terminal");
     }
 
-    var raw, fullText = ""; // fullText: the text path's body, kept for its errors
+    // fullText: the text path's body, kept for its errors.
+    // cut: the provider said it stopped for room, not because it was finished.
+    // read: whichever of the two whole-body routes ran, if either did.
+    var raw, fullText = "", cut = false, read;
     if (wantStream && res.body && res.body.getReader) {
       // The preview: objects completed so far are cut from the growing text
       // and mapped exactly as the commit below will map them — but only once
@@ -1218,7 +1335,7 @@ async function parseFood(text, image, onItems) {
       };
       var out;
       try {
-        out = await readStreamText(res, p.delta, onText, armStall);
+        out = await readStreamText(res, p.delta, p.truncated, onText, armStall);
       } catch (e) {
         // Headers made it here, so a death now is the transfer dying under us,
         // not the provider saying no — either way worth another go. Whatever
@@ -1234,12 +1351,22 @@ async function parseFood(text, image, onItems) {
       // array read back at the user cannot.
       if (out.error) throw apiError(p.host + ": " + out.error, "soft");
       raw = out.text;
+      cut = out.cut;
       if (!raw) {
         // Nothing framed as an answer, and no complaint either: the provider
         // ignored the stream flag and sent one plain body. Still an answer,
-        // still one we paid for — read it the way the text path would.
+        // still one we paid for — read it the way the text path would, which
+        // means asking it why it stopped as well as what it said.
         fullText = out.body;
-        try { raw = p.extract(JSON.parse(out.body)); } catch (e) { raw = ""; }
+        var parsed = null;
+        try { parsed = JSON.parse(out.body); } catch (e) {}
+        read = readWhole(p, parsed);
+        raw = read.raw;
+        // The stream's own word stands if it had one. A body that would not parse
+        // is not a body saying the answer was finished — and a reasoning model
+        // that streamed nothing but thinking arrives here every time, with the
+        // one thing worth knowing already framed out of its last chunk.
+        cut = cut || read.cut;
       }
     } else {
       // No readable stream — an old browser, or a response with no body to
@@ -1248,7 +1375,9 @@ async function parseFood(text, image, onItems) {
       var plain = await readBody(res);
       if (timedOut) throw timeoutErr();
       fullText = plain.text;
-      raw = p.extract(plain.json || {});
+      read = readWhole(p, plain.json);
+      raw = read.raw;
+      cut = read.cut;
     }
 
     var clean = raw.replace(/```json|```/g, "").trim();
@@ -1257,10 +1386,20 @@ async function parseFood(text, image, onItems) {
     try {
       arr = JSON.parse(clean);
     } catch (e) {
-      throw apiError("Model did not return JSON. Response: " + (clean || fullText || "empty"), "soft");
+      // Three troubles arrive here as the same unparseable text, and only one of
+      // them is the model writing badly. The provider says which when it says why
+      // it stopped, and the difference is worth passing on: what to do about a
+      // ceiling is not what to do about a ramble. Asked only once the text has
+      // failed to parse, so an answer that arrived whole despite a truncation
+      // flag is still an answer.
+      if (cut) throw cutOffError(p, clean, opts.thinking !== "off");
+      if (!clean && THINKING_FIELD.test(fullText)) {
+        throw apiError(p.host + " returned its reasoning and no answer.", "soft");
+      }
+      throw apiError("Model did not return JSON. Response: " + snip(clean || fullText || "empty"), "soft");
     }
     if (!Array.isArray(arr)) {
-      throw apiError("Expected a JSON array. Response: " + clean, "soft");
+      throw apiError("Expected a JSON array. Response: " + snip(clean), "soft");
     }
 
     return modelItems(arr);
@@ -1735,7 +1874,10 @@ function pendingStatus(e) {
   if (e.parked) return e.error || "Failed.";
   if (!apiKey()) return "waiting for an API key" + day;
   if (!navigator.onLine) return "waiting for a connection" + day;
-  if (e.error) return e.error + "\nWill retry.";
+  // The retry line says what will be different about it when anything is: an
+  // entry that overran its budget goes out again without thinking, and being
+  // told so is the difference between waiting and wondering.
+  if (e.error) return e.error + (e.noThink ? "\nWill retry without thinking." : "\nWill retry.");
   return "pending" + day;
 }
 
@@ -1866,7 +2008,10 @@ function log() {
 }
 
 function retryPending(id) {
-  patchEntry(id, { parked: false, attempts: 0, error: "" });
+  // noThink goes with the attempts: a retry you press is a fresh start, and if
+  // you pressed it after changing a setting, a downgrade left over from the last
+  // try would quietly undo the change.
+  patchEntry(id, { parked: false, attempts: 0, error: "", noThink: false });
   render();
   drainNow();
 }
@@ -1927,10 +2072,12 @@ function preconnect() {
 // for that — beyond it we would only be queueing at the provider instead.
 var MAX_INFLIGHT = 3;
 // What a failure worth repeating waits before the next try, one step per retry.
-// The list is therefore also how many tries an entry gets: when the steps run
-// out it parks and waits for you. The point of retrying at all is that it
-// happens without you — before this the only triggers were things you did, so a
-// rate limit at breakfast sat there until you next opened the app.
+// The list is therefore also how many tries an entry gets — with one exception,
+// the downgrade below, which earns a try the steps did not budget for and so
+// takes the last step twice. When they run out it parks and waits for you. The
+// point of retrying at all is that it happens without you — before this the only
+// triggers were things you did, so a rate limit at breakfast sat there until you
+// next opened the app.
 var RETRY_MS = [2000, 8000];
 var MAX_ATTEMPTS = RETRY_MS.length + 1;
 // A request that never reached the provider says nothing about the entry and
@@ -2028,7 +2175,7 @@ async function send(e) {
       // last one whole. Only the pending list redraws for it: a full render()
       // would rebuild the day, the chart and the history for every step, and
       // renderPending never touches an open item editor.
-      parsed = await parseFood(e.text, e.image, function (items) {
+      parsed = await parseFood(e, function (items) {
         streamProgress[e.id] = items;
         renderPending();
       });
@@ -2058,10 +2205,19 @@ async function send(e) {
     }
 
     var attempts = (e.attempts || 0) + 1;
-    var parked = failure.retry === "terminal" || attempts >= MAX_ATTEMPTS;
-    // Unparked means a try is left, and the list holds a step for each of those.
-    mark(e.id, { attempts: attempts, error: msg, parked: parked },
-      parked ? 0 : Date.now() + RETRY_MS[attempts - 1]);
+    // A downgrade is a terminal failure with one thing left to change, so it is
+    // the one that does not park. The flag rides on the entry, so it survives a
+    // reload and the request that follows goes out without reasoning. Set rather
+    // than assigned, because a downgraded try that then fails softly must keep
+    // going out downgraded.
+    var downgrade = failure.retry === "downgrade";
+    var parked = !downgrade && (failure.retry === "terminal" || attempts >= MAX_ATTEMPTS);
+    var patch = { attempts: attempts, error: msg, parked: parked };
+    if (downgrade) patch.noThink = true;
+    // Unparked means a try is left, and the list holds a step for each of those —
+    // except a downgrade, which can outlive them and takes the last step twice.
+    mark(e.id, patch, parked ? 0
+      : Date.now() + RETRY_MS[Math.min(attempts - 1, RETRY_MS.length - 1)]);
   } finally {
     // The one redraw for whatever this settled on — the day it wrote, or the
     // error it recorded. It comes after the flags, since before that the row

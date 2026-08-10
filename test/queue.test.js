@@ -162,11 +162,26 @@ const frame = (chunk) => "data: " + JSON.stringify(chunk) + "\n\n";
 const aDelta = (text) => frame({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text } });
 const gDelta = (text) => frame({ candidates: [{ content: { parts: [{ text }] } }] });
 const oDelta = (content) => frame({ choices: [{ delta: { content } }] });
-// The status line under each pending entry, top to bottom. Asked for by class,
-// not position — a photo entry grows a thumbnail ahead of its text column.
-const pendMeta = (h) => h.els["pending"].children.map((li) =>
-  li.children.find((c) => c.className === "pend-left")
-    .children.find((c) => c.className === "pend-meta").textContent);
+// A reasoning model thinks out loud in chunks that carry no answer text at all.
+const oReason = (reasoning_content) => frame({ choices: [{ delta: { reasoning_content, content: null } }] });
+// The chunk that ends an openai-compatible stream carries no text, only the
+// reason it is the last one.
+const oFinish = (reason) => frame({ choices: [{ delta: {}, finish_reason: reason }] });
+// A whole answer, in the two shapes the app can be handed one: as a body it
+// asked to be streamed and was not, and as a plain non-streamed response.
+const oWhole = ({ content = "", reasoning, finish }) => JSON.stringify({
+  choices: [{ message: { role: "assistant", content, reasoning_content: reasoning }, finish_reason: finish }],
+});
+const aWhole = (text, extra) => ({
+  ok: true, status: 200,
+  text: async () => JSON.stringify({ content: [{ type: "text", text }], ...extra }),
+});
+// One part of each pending entry, top to bottom, asked for by class rather than
+// position — a photo entry grows a thumbnail ahead of the column holding these.
+const pendPart = (h, cls) => h.els["pending"].children.map((li) =>
+  (descendants(li).find((c) => c.className === cls) || {}).textContent);
+// The status line under each pending entry.
+const pendMeta = (h) => pendPart(h, "pend-meta");
 // The first item of the only day, for the tests that log exactly one thing.
 // Empty rather than absent when nothing was written, so a test that expected
 // an item reports the miss instead of throwing and taking the rest with it.
@@ -203,6 +218,9 @@ function check(name, cond, extra) {
 }
 
 const baseStore = () => ({ "protein.apiKey": "sk-test", "protein.provider": "anthropic" });
+// The same for the one provider the reasoning tests need, since a key lives
+// under a per-provider name once the provider is not the default.
+const dsStore = () => ({ "protein.provider": "deepseek", "protein.apiKey.deepseek": "sk-ds" });
 
 (async () => {
   // ---- 1. happy path: enqueue -> drain -> lands in days, queue empty
@@ -995,7 +1013,7 @@ const baseStore = () => ({ "protein.apiKey": "sk-test", "protein.provider": "ant
   {
     console.log("31. deepseek streaming");
     const h = makeHarness({
-      store: { "protein.provider": "deepseek", "protein.apiKey.deepseek": "sk-ds" },
+      store: dsStore(),
       fetchImpl: async () => sse([
         oDelta(null), // a reasoning chunk: content is null, not text
         oDelta('[{"name":"Toast","amount":"1 slice","protein_g":4,"certainty":"high","calories_kcal":90,"calorie_certainty":"medium"}]'),
@@ -1120,9 +1138,265 @@ const baseStore = () => ({ "protein.apiKey": "sk-test", "protein.provider": "ant
     check("retryable", q(h)[0].parked === false && q(h)[0].attempts === 1, q(h)[0]);
   }
 
-  // ---- 38. a photo rides the entry: queued, on the wire, gone once logged
+  // ---- 38. an answer that stopped for room, read the ordinary way. There is
+  //          text before the cut, so the model was writing the array and outgrew
+  //          it — nothing a second ask can shorten, and turning thinking off
+  //          would only hand the same answer a smaller ceiling.
   {
-    console.log("38. photo + text");
+    console.log("38. truncated whole body, no stream");
+    let calls = 0;
+    const h = makeHarness({
+      streamCapable: false, store: baseStore(),
+      fetchImpl: async () => { calls++; return aWhole('[{"name":"Eg', { stop_reason: "max_tokens" }); },
+    });
+    h.els["food-input"].value = "4 eggs";
+    h.els["log-btn"].click();
+    // Nothing is scheduled: an answer that outgrew the room is terminal, so
+    // there is no timer here to wait out.
+    await settle();
+    check("named as the ceiling it was", /ran out of room/.test(q(h)[0].error), q(h)[0].error);
+    check("not blamed on the model's writing", !/Model did not return JSON/.test(q(h)[0].error), q(h)[0].error);
+    check("nothing written from half an answer", Object.keys(days(h)).length === 0, days(h));
+    check("told what to do about it", /fewer foods/.test(q(h)[0].error), q(h)[0].error);
+    // Not one wasted ask: the three a soft failure would have bought, and not
+    // even the one a downgrade buys — there is nothing here left to turn off.
+    check("asked once and no more", calls === 1, calls);
+    check("parked", q(h)[0].parked === true, q(h)[0]);
+  }
+
+  // ---- 39. the same news, carried by the chunk that ends a stream
+  {
+    console.log("39. truncated stream");
+    const h = makeHarness({
+      store: { ...dsStore(), "protein.thinking.deepseek": "off" },
+      fetchImpl: async () => sse([oDelta('[{"name":"Eg'), oFinish("length"), "data: [DONE]\n\n"]),
+    });
+    h.els["food-input"].value = "a long list";
+    h.els["log-btn"].click();
+    // Nothing is scheduled on this path: thinking is already off, so there is
+    // no downgrade left and the failure parks where it stands.
+    await settle();
+    check("named as the ceiling it was", /ran out of room/.test(q(h)[0].error), q(h)[0].error);
+    check("told what to do about it", /fewer foods/.test(q(h)[0].error), q(h)[0].error);
+    check("parked rather than asked again", q(h)[0].parked === true, q(h)[0]);
+    check("no progress left behind", Object.keys(h.ctx.streamProgress).length === 0, h.ctx.streamProgress);
+  }
+
+  // ---- 40. the same news again, but from a stream that said nothing else. A
+  //          reasoning model streams its thinking as content-less chunks, so a
+  //          budget spent entirely on thinking arrives as an answer of no text
+  //          at all — which sends it down the branch meant for a provider that
+  //          ignored the stream flag, where the body is SSE frames and will not
+  //          parse. What the frames already said about why it stopped has to
+  //          survive that. 41 has the retry this earns; here it only has to be
+  //          read as a ceiling rather than as a model with nothing to say.
+  {
+    console.log("40. a stream of nothing but thinking");
+    const h = makeHarness({
+      store: { ...dsStore(), "protein.thinking.deepseek": "on" },
+      fetchImpl: async () => sse([
+        oReason("Need estimate each. "), oReason("Wait rule says ~10g. "),
+        oFinish("length"), "data: [DONE]\n\n",
+      ]),
+    });
+    h.els["food-input"].value = "4 eggs";
+    h.els["log-btn"].click();
+    await settle();
+    check("read as the ceiling, not as a model with nothing to say",
+      /spent its whole token budget thinking/.test(q(h)[0].error), q(h)[0].error);
+    check("marked for the try without thinking", q(h)[0].noThink === true, q(h)[0]);
+  }
+
+  // ---- 41. the reported bug, whole: thinking on, the budget spent entirely on
+  //          thinking, and the answer never started. The body comes back as one
+  //          plain object to a streamed request, which is the route that hid it.
+  //          Both halves are one run — what the user is told, and what the app
+  //          does about it — because the second only means anything given the
+  //          first: the row promises a try without thinking, so the request that
+  //          follows had better be one.
+  {
+    console.log("41. all of the budget spent thinking");
+    const trace = "We need answer as JSON array. Wait rule says a bit is ~10g. ".repeat(60);
+    const bodies = [];
+    const h = makeHarness({
+      store: { ...dsStore(), "protein.thinking.deepseek": "on", "protein.effort.deepseek": "max" },
+      fetchImpl: async (url, init) => {
+        bodies.push(JSON.parse(init.body));
+        return sse([bodies.length === 1
+          ? oWhole({ reasoning: trace, finish: "length" })
+          : oDelta('[{"name":"Kefir","amount":"500 g","protein_g":35,"certainty":"high","calories_kcal":300,"calorie_certainty":"medium"}]')]);
+      },
+    });
+    h.ctx.RETRY_MS[0] = 60;   // long enough to still be waiting at the first checks
+    h.els["food-input"].value = "500 g kefir, 2 bananas";
+    h.els["log-btn"].click();
+    await settle();
+    const err = q(h)[0].error;
+    check("said where the budget went", /spent its whole token budget thinking/.test(err), err);
+    check("not one word of the trace", !/Wait rule says/.test(err), err);
+    check("short enough for a queue row", err.length < 300, err.length);
+    check("the row promises the retry it will make", /Will retry without thinking/.test(pendMeta(h)[0]), pendMeta(h)[0]);
+    check("not parked while that try is left", q(h)[0].parked === false, q(h)[0]);
+    check("first try was allowed to think",
+      bodies[0].thinking.type === "enabled" && bodies[0].reasoning_effort === "max", bodies[0]);
+
+    await settle(120);
+    check("asked again without thinking", bodies.length === 2, bodies.length);
+    check("and told the provider so", bodies[1].thinking.type === "disabled", bodies[1]);
+    check("with the effort dropped too", bodies[1].reasoning_effort === undefined, bodies[1]);
+    check("and an answer-sized budget", bodies[1].max_tokens === 2000, bodies[1]);
+    check("the second answer landed", only(h).protein === 35, days(h));
+    check("queue drained", q(h).length === 0, q(h));
+  }
+
+  // ---- 42. a second ceiling means the answer is the long thing, not the
+  //          thinking — and there is nothing left to turn off
+  {
+    console.log("42. truncated again without thinking");
+    let calls = 0;
+    const h = makeHarness({
+      store: { ...dsStore(), "protein.thinking.deepseek": "on" },
+      fetchImpl: async () => { calls++; return sse([oWhole({ finish: "length" })]); },
+    });
+    h.ctx.RETRY_MS[0] = 20;
+    h.els["food-input"].value = "everything I ate today";
+    h.els["log-btn"].click();
+    await settle(80);
+    check("tried twice and no more", calls === 2, calls);
+    check("parked", q(h)[0].parked === true, q(h)[0]);
+    check("told what to do about it", /fewer foods/.test(q(h)[0].error), q(h)[0].error);
+  }
+
+  // ---- 43. a downgrade earns a try the retry list did not budget for, so the
+  //          step it waits on is the last one rather than one off the end. A
+  //          step off the end is `undefined`, and now + undefined is NaN, which
+  //          mark() reads as no cooldown at all and deletes — so the entry does
+  //          not hang, it goes straight back out with no wait. The try happens
+  //          either way; whether it waited is the whole difference.
+  {
+    console.log("43. a downgrade past the end of the retry list");
+    let calls = 0;
+    const h = makeHarness({
+      store: { ...dsStore(), "protein.thinking.deepseek": "on" },
+      fetchImpl: async () => {
+        calls++;
+        // Two soft failures first, so the truncation lands on attempt 3 — one
+        // past the last step the list holds. The wait it earns is widened only
+        // once those are through, so the state below can be read at leisure
+        // instead of inside a window timed to the millisecond.
+        if (calls <= 2) return httpErr(503, "overloaded");
+        h.ctx.RETRY_MS[1] = 5000;
+        return sse([oWhole({ finish: "length" })]);
+      },
+    });
+    h.ctx.RETRY_MS[0] = 5;
+    h.ctx.RETRY_MS[1] = 5;
+    h.els["food-input"].value = "4 eggs";
+    h.els["log-btn"].click();
+    await settle();
+    const id = q(h)[0].id;
+    check("the truncation landed past the last step", q(h)[0].attempts === 3, q(h)[0]);
+    check("and bought a try the list had no step for", q(h)[0].noThink === true, q(h)[0]);
+    // Waiting, and on a moment that arrives — not sent, and not on the NaN that
+    // an unclamped step would have left, which mark() drops entirely.
+    check("which waits its turn rather than going out at once",
+      h.ctx.cooling[id] > Date.now() && !h.ctx.sending[id], h.ctx.cooling);
+    // Rather than sit out the wait: a trigger beats a cooldown, which is what
+    // drainNow is for.
+    h.ctx.drainNow();
+    await settle();
+    check("and then goes, and parks", calls === 4 && q(h)[0].parked === true, q(h)[0]);
+  }
+
+  // ---- 44. a model that thought and then said nothing, having stopped of its
+  //          own accord: a whim, not a ceiling, and worth one more ask
+  {
+    console.log("44. reasoning and no answer");
+    let calls = 0;
+    const h = makeHarness({
+      store: dsStore(),
+      fetchImpl: async () => {
+        calls++;
+        return sse([calls === 1
+          ? oWhole({ reasoning: "Thinking about eggs.", finish: "stop" })
+          : oDelta('[{"name":"Eggs","amount":"4","protein_g":25,"certainty":"high","calories_kcal":360,"calorie_certainty":"high"}]')]);
+      },
+    });
+    h.ctx.RETRY_MS[0] = 60;   // long enough to still be waiting at the first check
+    h.els["food-input"].value = "4 eggs";
+    h.els["log-btn"].click();
+    await settle();
+    check("named for what it was", /returned its reasoning and no answer/.test(q(h)[0].error), q(h)[0].error);
+    check("not blamed on a ceiling", !/room|budget/.test(q(h)[0].error), q(h)[0].error);
+    check("still worth asking again", q(h)[0].parked === false && q(h)[0].attempts === 1, q(h)[0]);
+    await settle(120);
+    check("and the retry landed", only(h).protein === 25, days(h));
+  }
+
+  // ---- 45. a model that simply wrote prose still says so in one line
+  {
+    console.log("45. long garbage is cut to a line");
+    const h = makeHarness({
+      streamCapable: false, store: baseStore(),
+      fetchImpl: async () => aWhole("Here is the JSON array you asked for.\n".repeat(150)),
+    });
+    h.els["food-input"].value = "4 eggs";
+    h.els["log-btn"].click();
+    await settle();
+    const err = q(h)[0].error;
+    check("still named for what it is", /Model did not return JSON/.test(err), err);
+    check("cut to a queue row", err.length < 300, err.length);
+    check("and marked as cut", /…$/.test(err), err);
+    check("no newlines of its own", !/\n/.test(err), err);
+  }
+
+  // ---- 46. the budget the request actually carries, which is the whole bug:
+  //          a model left on its provider's default reasons anyway, so the
+  //          default gets the room too
+  {
+    console.log("46. the budget on the wire");
+    // What one request put on the wire, for a store and the wire format that
+    // store speaks. The answer is empty because nothing here reads it.
+    const sentFor = async (store, delta = oDelta) => {
+      let body = null;
+      const h = makeHarness({
+        store, fetchImpl: async (url, init) => {
+          body = JSON.parse(init.body);
+          return sse([delta("[]")]);
+        },
+      });
+      h.els["food-input"].value = "4 eggs";
+      h.els["log-btn"].click();
+      await settle();
+      return body;
+    };
+    const on = await sentFor({ ...dsStore(), "protein.thinking.deepseek": "on" });
+    const byDefault = await sentFor(dsStore());
+    const off = await sentFor({ ...dsStore(), "protein.thinking.deepseek": "off" });
+    const gemStore = { "protein.provider": "gemini", "protein.apiKey.gemini": "AIza" };
+    const gem = await sentFor(gemStore, gDelta);
+    // An effort set alongside an explicit "off" used to win, which turned the
+    // thinking back on and then gave it an answer-sized ceiling to do it in —
+    // the exact shape of the bug this file is mostly about.
+    const gemOffWithEffort = await sentFor(
+      { ...gemStore, "protein.thinking.gemini": "off", "protein.effort.gemini": "high" }, gDelta);
+    check("thinking on gets room to think", on.max_tokens === 16000, on.max_tokens);
+    // The budget and the model it is asked of have to move together: the older
+    // deepseek-chat caps max_tokens at 8k, so a default that drifted back to it
+    // would 400 on every request the moment thinking was anything but off.
+    check("and asks it of a model that can take it", on.model === "deepseek-v4-flash", on.model);
+    check("so does the provider default", byDefault.max_tokens === 16000, byDefault.max_tokens);
+    check("thinking off gets room to answer", off.max_tokens === 2000, off.max_tokens);
+    check("and gemini says the same in its own words",
+      gem.generationConfig.maxOutputTokens === 16000, gem.generationConfig);
+    check("an effort cannot turn thinking back on",
+      gemOffWithEffort.generationConfig.thinkingConfig.thinkingBudget === 0,
+      gemOffWithEffort.generationConfig);
+  }
+
+  // ---- 47. a photo rides the entry: queued, on the wire, gone once logged
+  {
+    console.log("47. photo + text");
     const img = { mediaType: "image/jpeg", data: "AAAA" };
     let sentBody = null;
     const h = makeHarness({
@@ -1139,14 +1413,13 @@ const baseStore = () => ({ "protein.apiKey": "sk-test", "protein.provider": "ant
     const content = sentBody.messages[0].content;
     check("image block first, words after", Array.isArray(content) && content[0].source.media_type === "image/jpeg" && content[0].source.data === "AAAA", content);
     check("photo prompt with the text as caption", content[1].text === h.ctx.PHOTO_TEXT_PROMPT + JSON.stringify("with ketchup"), content[1]);
-    check("room for a photographed plate", sentBody.max_tokens === h.ctx.PHOTO_TOKENS, sentBody.max_tokens);
     check("item landed without the photo", only(h).protein === 25 && !("image" in only(h)), only(h));
     check("queue drained", q(h).length === 0, q(h));
   }
 
-  // ---- 39. photo alone is an entry: its own prompt, its own face in the list
+  // ---- 48. photo alone is an entry: its own prompt, its own face in the list
   {
-    console.log("39. photo only");
+    console.log("48. photo only");
     const img = { mediaType: "image/jpeg", data: "BBBB" };
     const g = gate();
     let sentBody = null;
@@ -1177,9 +1450,9 @@ const baseStore = () => ({ "protein.apiKey": "sk-test", "protein.provider": "ant
     check("queue drained", q(h).length === 0, q(h));
   }
 
-  // ---- 40. text alone is the request it always was — the photo left no trace
+  // ---- 49. text alone is the request it always was — the photo left no trace
   {
-    console.log("40. text-only unchanged");
+    console.log("49. text-only unchanged");
     let sentBody = null;
     const h = makeHarness({
       store: baseStore(),
@@ -1192,12 +1465,11 @@ const baseStore = () => ({ "protein.apiKey": "sk-test", "protein.provider": "ant
     const content = sentBody.messages[0].content;
     check("content is the bare string it always was", content === h.ctx.PARSE_PROMPT + JSON.stringify("4 eggs"), typeof content);
     check("no photo wording anywhere in it", !/photo/i.test(content));
-    check("the old cap", sentBody.max_tokens === 500, sentBody.max_tokens);
   }
 
-  // ---- 41. each provider dresses the same photo in its own wire format
+  // ---- 50. each provider dresses the same photo in its own wire format
   {
-    console.log("41. provider photo shapes");
+    console.log("50. provider photo shapes");
     const img = { mediaType: "image/jpeg", data: "CCCC" };
     const gItem = gDelta('[{"name":"Reis","amount":"~200 g","protein_g":5,"certainty":"medium","calories_kcal":260,"calorie_certainty":"medium"}]');
     let gBody = null;

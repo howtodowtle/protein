@@ -162,8 +162,11 @@ const frame = (chunk) => "data: " + JSON.stringify(chunk) + "\n\n";
 const aDelta = (text) => frame({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text } });
 const gDelta = (text) => frame({ candidates: [{ content: { parts: [{ text }] } }] });
 const oDelta = (content) => frame({ choices: [{ delta: { content } }] });
-// The status line under each pending entry, top to bottom.
-const pendMeta = (h) => h.els["pending"].children.map((li) => li.children[0].children[1].textContent);
+// The status line under each pending entry, top to bottom. Asked for by class,
+// not position — a photo entry grows a thumbnail ahead of its text column.
+const pendMeta = (h) => h.els["pending"].children.map((li) =>
+  li.children.find((c) => c.className === "pend-left")
+    .children.find((c) => c.className === "pend-meta").textContent);
 // The first item of the only day, for the tests that log exactly one thing.
 // Empty rather than absent when nothing was written, so a test that expected
 // an item reports the miss instead of throwing and taking the rest with it.
@@ -1115,6 +1118,125 @@ const baseStore = () => ({ "protein.apiKey": "sk-test", "protein.provider": "ant
     check("provider's words shown", /Overloaded/.test(q(h)[0].error), q(h)[0].error);
     check("not the half-written array", !/Model did not return JSON/.test(q(h)[0].error), q(h)[0].error);
     check("retryable", q(h)[0].parked === false && q(h)[0].attempts === 1, q(h)[0]);
+  }
+
+  // ---- 38. a photo rides the entry: queued, on the wire, gone once logged
+  {
+    console.log("38. photo + text");
+    const img = { mediaType: "image/jpeg", data: "AAAA" };
+    let sentBody = null;
+    const h = makeHarness({
+      store: baseStore(),
+      fetchImpl: async (url, init) => { sentBody = JSON.parse(init.body); return ok([{ name: "Eggs", amount: "4", protein_g: 25 }]); },
+    });
+    h.ctx.setPhoto(img);
+    check("preview row shown", h.els["photo-row"].classList.contains("has-photo"), h.els["photo-row"].className);
+    h.els["food-input"].value = "with ketchup";
+    h.els["log-btn"].click();
+    check("image queued with the entry", q(h).length === 1 && q(h)[0].image.data === "AAAA", q(h));
+    check("box cleared, photo included", h.ctx.pendingPhoto === null && !h.els["photo-row"].classList.contains("has-photo"), h.ctx.pendingPhoto);
+    await settle();
+    const content = sentBody.messages[0].content;
+    check("image block first, words after", Array.isArray(content) && content[0].source.media_type === "image/jpeg" && content[0].source.data === "AAAA", content);
+    check("photo prompt with the text as caption", content[1].text === h.ctx.PHOTO_TEXT_PROMPT + JSON.stringify("with ketchup"), content[1]);
+    check("room for a photographed plate", sentBody.max_tokens === h.ctx.PHOTO_TOKENS, sentBody.max_tokens);
+    check("item landed without the photo", only(h).protein === 25 && !("image" in only(h)), only(h));
+    check("queue drained", q(h).length === 0, q(h));
+  }
+
+  // ---- 39. photo alone is an entry: its own prompt, its own face in the list
+  {
+    console.log("39. photo only");
+    const img = { mediaType: "image/jpeg", data: "BBBB" };
+    const g = gate();
+    let sentBody = null;
+    const h = makeHarness({
+      store: baseStore(),
+      fetchImpl: async (url, init) => {
+        sentBody = JSON.parse(init.body);
+        return sse([
+          () => g.held,
+          aDelta('[{"name":"Pasta","amount":"~250 g","protein_g":9,"certainty":"medium","calories_kcal":400,"calorie_certainty":"medium"}]'),
+        ], init.signal);
+      },
+    });
+    h.ctx.setPhoto(img);
+    h.els["log-btn"].click();
+    await settle();
+    check("logged with nothing typed", q(h).length === 1, q(h));
+    const li = h.els["pending"].children[0];
+    const thumb = li.children.find((c) => c.className === "pend-thumb");
+    check("thumbnail drawn from the entry", !!thumb && thumb.src === "data:image/jpeg;base64,BBBB", thumb && thumb.src);
+    const text = li.children.find((c) => c.className === "pend-left").children[0];
+    check("wordless entry still reads as itself", text.textContent === "Photo", text.textContent);
+    check("estimating like any other", /estimating…/.test(pendMeta(h)[0]), pendMeta(h));
+    check("photo-only prompt, nothing appended", sentBody.messages[0].content[1].text === h.ctx.PHOTO_PROMPT, sentBody.messages[0].content[1]);
+    g.release();
+    await settle();
+    check("committed", only(h).protein === 9, days(h));
+    check("queue drained", q(h).length === 0, q(h));
+  }
+
+  // ---- 40. text alone is the request it always was — the photo left no trace
+  {
+    console.log("40. text-only unchanged");
+    let sentBody = null;
+    const h = makeHarness({
+      store: baseStore(),
+      fetchImpl: async (url, init) => { sentBody = JSON.parse(init.body); return ok([{ name: "Eggs", amount: "4", protein_g: 25 }]); },
+    });
+    h.els["food-input"].value = "4 eggs";
+    h.els["log-btn"].click();
+    check("no image field stored", !("image" in q(h)[0]), q(h)[0]);
+    await settle();
+    const content = sentBody.messages[0].content;
+    check("content is the bare string it always was", content === h.ctx.PARSE_PROMPT + JSON.stringify("4 eggs"), typeof content);
+    check("no photo wording anywhere in it", !/photo/i.test(content));
+    check("the old cap", sentBody.max_tokens === 500, sentBody.max_tokens);
+  }
+
+  // ---- 41. each provider dresses the same photo in its own wire format
+  {
+    console.log("41. provider photo shapes");
+    const img = { mediaType: "image/jpeg", data: "CCCC" };
+    const gItem = gDelta('[{"name":"Reis","amount":"~200 g","protein_g":5,"certainty":"medium","calories_kcal":260,"calorie_certainty":"medium"}]');
+    let gBody = null;
+    const g1 = makeHarness({
+      store: { "protein.provider": "gemini", "protein.apiKey.gemini": "AIza-test" },
+      fetchImpl: async (url, init) => { gBody = JSON.parse(init.body); return sse([gItem]); },
+    });
+    g1.ctx.setPhoto(img);
+    g1.els["log-btn"].click();
+    await settle();
+    const parts = gBody.contents[0].parts;
+    check("gemini: inline_data first, text after",
+      parts.length === 2 && parts[0].inline_data.mime_type === "image/jpeg" &&
+      parts[0].inline_data.data === "CCCC" && parts[1].text === g1.ctx.PHOTO_PROMPT, parts);
+
+    let g2Body = null;
+    const g2 = makeHarness({
+      store: { "protein.provider": "gemini", "protein.apiKey.gemini": "AIza-test" },
+      fetchImpl: async (url, init) => { g2Body = JSON.parse(init.body); return sse([gItem]); },
+    });
+    g2.els["food-input"].value = "reis";
+    g2.els["log-btn"].click();
+    await settle();
+    check("gemini: text alone keeps its one part",
+      g2Body.contents[0].parts.length === 1 && "text" in g2Body.contents[0].parts[0], g2Body.contents[0].parts);
+
+    let dBody = null;
+    const d = makeHarness({
+      store: { "protein.provider": "deepseek", "protein.apiKey.deepseek": "sk-ds" },
+      fetchImpl: async (url, init) => {
+        dBody = JSON.parse(init.body);
+        return sse([oDelta('[{"name":"Toast","amount":"1 slice","protein_g":4,"certainty":"high","calories_kcal":90,"calorie_certainty":"medium"}]'), "data: [DONE]\n\n"]);
+      },
+    });
+    d.ctx.setPhoto(img);
+    d.els["log-btn"].click();
+    await settle();
+    const dc = dBody.messages[0].content;
+    check("openai-compatible: a data URL", dc[0].image_url.url === "data:image/jpeg;base64,CCCC" && dc[1].type === "text", dc);
   }
 
   console.log("\n" + pass + " passed, " + fail + " failed");

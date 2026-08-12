@@ -530,7 +530,9 @@
 // passed through verbatim — no whitelist here, so new API values keep working.
 // request() takes stream and then image as its trailing arguments: it asks for
 // SSE when stream is set, and folds the photo — {mediaType, data}, base64 with
-// no data: prefix — into its own image block shape when one is given;
+// no data: prefix — into its own image block shape when one is given, which
+// only a provider saying photos: true is ever handed: an API with no such shape
+// is never asked to dress an image it cannot;
 // delta() is the streaming half of extract() — the visible text one SSE chunk
 // carries, "" for a chunk that carries none (pings, reasoning, stops).
 // truncated() is the reading that tells an answer cut short from a finished one:
@@ -577,6 +579,7 @@ var PROVIDERS = {
     host: "api.anthropic.com",
     model: "claude-haiku-4-5-20251001",
     keyHint: "sk-ant-…",
+    photos: true,
     // Suggestions only — the field accepts anything and sends it verbatim.
     efforts: ["low", "medium", "high", "xhigh", "max"],
     effortNote: "output_config.effort — Claude 4.6+ only (xhigh: 4.7+). Haiku 4.5 has no effort setting.",
@@ -625,6 +628,13 @@ var PROVIDERS = {
     // model you set yourself still wins; only an unconfigured provider lands here.
     model: "deepseek-v4-flash",
     keyHint: "sk-…",
+    // The one no here, and not a matter of which model: the endpoint's own
+    // schema takes a message's content as text and nothing else, so a picture
+    // is refused while the body is still being read, before any model sees it.
+    // Saying it here rather than letting the request go and fail is what turns
+    // "unknown variant `image_url`, expected `text` at line 1 column 213325"
+    // back into a sentence about photos.
+    photos: false,
     efforts: ["high", "max"],
     effortNote: "reasoning_effort — only high and max are distinct (low/medium map to high, xhigh to max).",
     request: function (key, model, prompt, opts, stream, image) {
@@ -640,6 +650,7 @@ var PROVIDERS = {
     host: "api.moonshot.ai",
     model: "kimi-latest",
     keyHint: "sk-…",
+    photos: true,
     efforts: [],
     effortNote: "reasoning_effort — not documented by Moonshot; may be ignored or rejected.",
     request: function (key, model, prompt, opts, stream, image) {
@@ -655,6 +666,7 @@ var PROVIDERS = {
     host: "generativelanguage.googleapis.com",
     model: "gemini-2.5-flash",
     keyHint: "AIza…",
+    photos: true,
     efforts: ["low", "high"],
     effortNote: "thinkingConfig.thinkingLevel — Gemini 3+ only; 2.5 uses a numeric thinkingBudget instead.",
     request: function (key, model, prompt, opts, stream, image) {
@@ -722,6 +734,19 @@ function openaiContent(prompt, image) {
 // in storage because Anthropic and Gemini want the halves named separately.
 function photoUrl(image) {
   return "data:" + image.mediaType + ";base64," + image.data;
+}
+// Whether a photo can be sent at all. Every provider says, the way every
+// provider says everything else about itself, and silence is a no: a fifth
+// provider added without the field refuses photos in a sentence naming itself,
+// which is wrong but says so — where the other default sends the picture and
+// gets the deserialize error this whole thing exists to stop showing.
+function readsPhotos(id) { return PROVIDERS[id].photos === true; }
+// Said once, in both places it is needed: to the entry that cannot be sent, and
+// to the tap that is about to make one. What it names is the way out — the
+// provider is a setting, and the same meal typed out goes anywhere.
+function noPhotoMsg(id) {
+  return PROVIDERS[id].label + " can't read photos — its API takes text only. " +
+    "Pick another provider in settings, or describe the food in words.";
 }
 
 // OpenAI-compatible chat/completions shape, shared by DeepSeek and Kimi.
@@ -1054,7 +1079,11 @@ var PHOTO_TEXT_PROMPT = PHOTO_PROMPT + [
 //                next trigger (reconnect, reopen).
 //   "soft"     — worth another go later; burns an attempt.
 //   "terminal" — the provider understood us and said no; retrying asks the same
-//                question and gets the same answer.
+//                question and gets the same answer. A request refused here on
+//                the provider's behalf — one its API has no shape for — is the
+//                same answer arrived at without asking, and counts as terminal
+//                rather than "defer": what cannot go is this entry, not the
+//                connection, so nothing is gained by holding the queue for it.
 //   "downgrade" — terminal as it stands, but there is one setting left to change,
 //                so it is worth asking again with that changed. See cutOffError.
 function apiError(msg, retry) {
@@ -1254,6 +1283,13 @@ async function parseFood(entry, onItems) {
   var p = PROVIDERS[id];
   var opts = optsFor(id);
   if (entry.noThink) { opts.thinking = "off"; opts.effort = ""; }
+  // Asked before anything is built, because there is no request to build: a
+  // provider with no shape for a photo would be handed one it cannot read, and
+  // would spend a round trip saying so in the words of its JSON parser.
+  // Terminal — nothing about this request improves by being asked again — but
+  // the provider is a setting, so Retry after changing it is a different
+  // question and gets a fresh try (see retryPending).
+  if (image && !readsPhotos(id)) throw apiError(noPhotoMsg(id), "terminal");
   // Streaming is asked for only when this browser can actually read a stream —
   // the flag changes what the server sends back, so it is never requested on
   // faith and left unreadable — only from a provider that brought a delta() to
@@ -2326,6 +2362,10 @@ foodInput.addEventListener("keydown", function (e) {
 // is coming that no textarea focus announces, so the connection warms here the
 // way it does there; the picker round-trip is the warm-up window.
 photoBtn.addEventListener("click", function () {
+  // The earliest moment the answer is known, and the cheapest: said here, no
+  // photo is taken, shrunk, stored and queued only to be refused later.
+  var id = provider();
+  if (!readsPhotos(id)) { showError(noPhotoMsg(id)); return; }
   preconnect();
   photoInput.click();
 });
@@ -2376,6 +2416,7 @@ function syncSettings() {
     "Your key is stored only in this browser (localStorage) and sent only to " +
     p.host + ". Requests go straight from your browser to the provider. " +
     "Model and effort are sent verbatim, and only when set. " +
+    (readsPhotos(id) ? "" : "Photos are text-only here: " + p.label + " takes no images. ") +
     (p.effortNote || "");
 }
 

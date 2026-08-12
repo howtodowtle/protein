@@ -218,9 +218,10 @@ function check(name, cond, extra) {
 }
 
 const baseStore = () => ({ "protein.apiKey": "sk-test", "protein.provider": "anthropic" });
-// The same for the other two providers the tests reach for, since a key lives
+// The same for the other providers the tests reach for, since a key lives
 // under a per-provider name once the provider is not the default.
 const dsStore = () => ({ "protein.provider": "deepseek", "protein.apiKey.deepseek": "sk-ds" });
+const kimiStore = () => ({ "protein.provider": "kimi", "protein.apiKey.kimi": "sk-km" });
 const geminiStore = () => ({ "protein.provider": "gemini", "protein.apiKey.gemini": "AIza-test" });
 
 (async () => {
@@ -1563,19 +1564,21 @@ const geminiStore = () => ({ "protein.provider": "gemini", "protein.apiKey.gemin
     check("gemini: text alone keeps its one part",
       gBody.contents[0].parts.length === 1 && "text" in gBody.contents[0].parts[0], gBody.contents[0].parts);
 
-    let dBody = null;
-    const d = makeHarness({
-      store: dsStore(),
+    // Kimi for the openai-compatible shape, since it is the one of the two that
+    // can be sent a photo at all — DeepSeek's refusal is test 55's subject.
+    let kBody = null;
+    const k = makeHarness({
+      store: kimiStore(),
       fetchImpl: async (url, init) => {
-        dBody = JSON.parse(init.body);
+        kBody = JSON.parse(init.body);
         return sse([oDelta('[{"name":"Toast","amount":"1 slice","protein_g":4,"certainty":"high","calories_kcal":90,"calorie_certainty":"medium"}]'), "data: [DONE]\n\n"]);
       },
     });
-    d.ctx.setPhoto(img);
-    d.els["log-btn"].click();
+    k.ctx.setPhoto(img);
+    k.els["log-btn"].click();
     await settle();
-    const dc = dBody.messages[0].content;
-    check("openai-compatible: a data URL", dc[0].image_url.url === "data:image/jpeg;base64,CCCC" && dc[1].type === "text", dc);
+    const kc = kBody.messages[0].content;
+    check("openai-compatible: a data URL", kc[0].image_url.url === "data:image/jpeg;base64,CCCC" && kc[1].type === "text", kc);
   }
 
   // ---- 53. shrinking a photo takes long enough for the box to move on, and
@@ -1664,6 +1667,51 @@ const geminiStore = () => ({ "protein.provider": "gemini", "protein.apiKey.gemin
     g.release();
     await settle();
     check("and is let go of with the entry", Object.keys(h.ctx.thumbNodes).length === 0, h.ctx.thumbNodes);
+  }
+
+  // ---- 55. a provider that takes no images is told so here, not asked: the
+  //          photo never goes out, and the row says what to do about it
+  {
+    console.log("55. a provider that can't read photos");
+    let calls = 0;
+    const h = makeHarness({
+      store: dsStore(),
+      fetchImpl: async () => { calls++; return ok([{ name: "Toast", amount: "1 slice", protein_g: 4 }]); },
+    });
+
+    // The tap that would take the photo: refused where it is cheapest, with the
+    // picker left shut rather than opened for a photo that cannot be sent.
+    let opened = false;
+    h.els["photo-input"].click = () => { opened = true; };
+    h.els["photo-btn"].click();
+    check("picker not opened", !opened, opened);
+    check("and it says why", /DeepSeek can't read photos/.test(h.els["error"].textContent), h.els["error"].textContent);
+
+    // A photo attached under another provider and logged under this one — the
+    // one route the button cannot guard, since the setting can change after.
+    h.ctx.setPhoto({ mediaType: "image/jpeg", data: "GGGG" });
+    h.els["log-btn"].click();
+    await settle();
+    check("nothing was sent", calls === 0, calls);
+    check("parked, not retried at the same wall", q(h)[0].parked, q(h)[0]);
+    check("the row names the provider and the way out",
+      /DeepSeek can't read photos.*settings/.test(q(h)[0].error), q(h)[0].error);
+    check("and not a word of the parser's", !/image_url|deserialize/.test(q(h)[0].error), q(h)[0].error);
+
+    // The setting is the thing to change, so changing it and pressing Retry is
+    // a different question — and gets a real request.
+    h.store["protein.provider"] = "anthropic";
+    h.store["protein.apiKey"] = "sk-test";
+    h.ctx.retryPending(q(h)[0].id);
+    await settle();
+    check("the same photo goes out once it can", calls === 1, calls);
+    check("queue drained", q(h).length === 0, q(h));
+
+    // Settings say it in advance, beside the rest of what this provider does.
+    h.store["protein.provider"] = "deepseek";
+    h.els["settings-toggle"].click();
+    check("settings warn before a photo is taken",
+      /takes no images/.test(h.els["settings-note"].textContent), h.els["settings-note"].textContent);
   }
 
   console.log("\n" + pass + " passed, " + fail + " failed");

@@ -1702,7 +1702,7 @@ const geminiStore = () => ({ "protein.provider": "gemini", "protein.apiKey.gemin
     // a different question — and gets a real request.
     h.store["protein.provider"] = "anthropic";
     h.store["protein.apiKey"] = "sk-test";
-    descendants(h.els["pending"].children[0]).find((c) => c.className === "pend-retry").click();
+    h.ctx.retryPending(q(h)[0].id);
     await settle();
     check("the same photo goes out once it can", calls === 1, calls);
     check("queue drained", q(h).length === 0, q(h));

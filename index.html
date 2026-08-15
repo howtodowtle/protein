@@ -500,6 +500,7 @@
     </div>
     <div id="week"></div>
     <p class="footnote" id="week-note">Tap a bar for that day. The dashed line is your goal. Estimates are approximate. Values in grams.</p>
+    <p class="footnote" id="week-avg"></p>
   </section>
 
 </div>
@@ -1485,7 +1486,7 @@ var photoBtn = $("photo-btn"), photoInput = $("photo-input");
 var photoRow = $("photo-row"), photoThumb = $("photo-thumb"), photoClear = $("photo-clear");
 var itemsEl = $("items"), emptyMsg = $("empty-msg"), itemsHint = $("items-hint");
 var itemsHead = $("items-head"), sortToggle = $("sort-toggle");
-var weekEl = $("week"), weekNote = $("week-note");
+var weekEl = $("week"), weekNote = $("week-note"), weekAvg = $("week-avg");
 var pendingEl = $("pending"), offlineNote = $("offline-note");
 var historyEl = $("history"), historyBody = $("history-body");
 var historyTitle = $("history-title"), historySub = $("history-sub");
@@ -1678,6 +1679,23 @@ function render() {
   weekNote.textContent = m.goal
     ? "Tap a bar for that day. The dashed line is your goal. Estimates are approximate. Values in grams."
     : "Tap a bar for that day. Estimates are approximate. Values in kcal.";
+
+  // Running average over the days just before today — today is still filling up,
+  // so it is left out, and so is any day with nothing logged: an empty day is a
+  // gap in the record, not a zero to average in.
+  var avgSum = 0, avgCount = 0;
+  for (var a = 1; a <= 6; a++) {
+    var ad = new Date();
+    ad.setDate(ad.getDate() - a);
+    var aItems = days[fmt(ad)];
+    if (aItems && aItems.length) {
+      avgSum += sumField(aItems, m.field);
+      avgCount++;
+    }
+  }
+  weekAvg.textContent = avgCount
+    ? avgCount + "-day average: " + Math.round(avgSum / avgCount) + " " + m.unit + "/day"
+    : "Not enough days logged yet for an average.";
 
   // A background drain (a queued entry landing) can change a day while the
   // history screen is open over it; keep that screen current when it is. The

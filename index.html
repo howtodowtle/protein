@@ -500,6 +500,7 @@
     </div>
     <div id="week"></div>
     <p class="footnote" id="week-note">Tap a bar for that day. The dashed line is your goal. Estimates are approximate. Values in grams.</p>
+    <p class="footnote" id="week-avg"></p>
   </section>
 
 </div>
@@ -1485,7 +1486,7 @@ var photoBtn = $("photo-btn"), photoInput = $("photo-input");
 var photoRow = $("photo-row"), photoThumb = $("photo-thumb"), photoClear = $("photo-clear");
 var itemsEl = $("items"), emptyMsg = $("empty-msg"), itemsHint = $("items-hint");
 var itemsHead = $("items-head"), sortToggle = $("sort-toggle");
-var weekEl = $("week"), weekNote = $("week-note");
+var weekEl = $("week"), weekNote = $("week-note"), weekAvg = $("week-avg");
 var pendingEl = $("pending"), offlineNote = $("offline-note");
 var historyEl = $("history"), historyBody = $("history-body");
 var historyTitle = $("history-title"), historySub = $("history-sub");
@@ -1632,7 +1633,11 @@ function render() {
     d.setDate(d.getDate() - i);
     var isToday = i === 0;
     var key = fmt(d);
-    week.push({ d: d, key: key, isToday: isToday, total: isToday ? total : sumField(days[key] || [], m.field) });
+    var dayItems = days[key] || [];
+    // logged is not derivable from total: a day with nothing in it and a day
+    // that summed to nothing both total 0, and only one of them is a day.
+    week.push({ d: d, key: key, isToday: isToday, logged: dayItems.length > 0,
+                total: isToday ? total : sumField(dayItems, m.field) });
   }
 
   // Scale so the tallest of {each day's total, the goal} fills the bar area. The
@@ -1678,6 +1683,18 @@ function render() {
   weekNote.textContent = m.goal
     ? "Tap a bar for that day. The dashed line is your goal. Estimates are approximate. Values in grams."
     : "Tap a bar for that day. Estimates are approximate. Values in kcal.";
+
+  // The running average reads off the same seven days the chart just drew, minus
+  // today — today is still filling up, and a part-day would drag the figure down.
+  // Days with nothing logged drop out too: an empty day is a gap in the record,
+  // not a zero to average in. Taking the window from `week` rather than walking
+  // the dates again is what keeps the number and the bars above it talking about
+  // the same days, however that window is later changed.
+  var avgDays = week.filter(function (x) { return !x.isToday && x.logged; });
+  var avgTotal = avgDays.reduce(function (s, x) { return s + x.total; }, 0);
+  weekAvg.textContent = avgDays.length
+    ? avgDays.length + "-day average: " + Math.round(avgTotal / avgDays.length) + " " + m.unit + "/day"
+    : "Not enough days logged yet for an average.";
 
   // A background drain (a queued entry landing) can change a day while the
   // history screen is open over it; keep that screen current when it is. The

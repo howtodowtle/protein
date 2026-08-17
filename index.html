@@ -303,6 +303,22 @@
      and the other keeping its seat. */
   .edit-actions { display: flex; align-items: center; gap: 12px; margin-left: auto; }
 
+  /* Batches — the day's items regrouped by the submission that filed them,
+     closed by default so the flat list above stays the one thing on screen
+     that matters at a glance. Each row states what that list cannot: when the
+     food was actually logged, not when the model got back to it. */
+  .batches-section { margin-top: 24px; }
+  .batches-head { padding-top: 12px; }
+  #batches { list-style: none; margin-top: 4px; display: none; }
+  #batches.open { display: block; }
+  .batch-row {
+    display: flex; align-items: baseline; justify-content: space-between;
+    gap: 12px; padding: 10px 0; border-bottom: 0.5px dotted #dcdcdc;
+  }
+  .batch-time { font-weight: 700; }
+  .batch-count { margin-left: 8px; font-size: 13px; color: #6b6b6b; }
+  .batch-total { font-weight: 900; font-variant-numeric: tabular-nums; flex-shrink: 0; }
+
   /* Week chart */
   .week-section { margin-top: 32px; }
   .week-head { padding-top: 12px; }
@@ -506,6 +522,15 @@
     <!-- Text comes from render(), which has two sentences to choose between.
          Left empty here so the wording has one owner, as with #sort-toggle. -->
     <p id="items-hint" class="footnote"></p>
+  </section>
+
+  <section class="batches-section" id="batches-section">
+    <div class="rule-4"></div>
+    <div class="header-row batches-head">
+      <span class="label-tiny" id="batches-label"></span>
+      <button id="batches-toggle" class="link-btn" type="button"></button>
+    </div>
+    <ul id="batches"></ul>
   </section>
 
   <section class="week-section">
@@ -1599,6 +1624,8 @@ var photoBtn = $("photo-btn"), photoInput = $("photo-input");
 var photoRow = $("photo-row"), photoThumb = $("photo-thumb"), photoClear = $("photo-clear");
 var itemsEl = $("items"), emptyMsg = $("empty-msg"), itemsHint = $("items-hint");
 var itemsHead = $("items-head"), sortToggle = $("sort-toggle");
+var batchesSection = $("batches-section"), batchesLabel = $("batches-label");
+var batchesToggle = $("batches-toggle"), batchesEl = $("batches");
 var weekEl = $("week"), weekNote = $("week-note"), weekAvg = $("week-avg");
 var pendingEl = $("pending"), offlineNote = $("offline-note");
 var historyEl = $("history"), historyBody = $("history-body");
@@ -1638,6 +1665,38 @@ function sortItems(items, mode, m) {
   // Least sure first: this order exists to be worked down and emptied.
   else if (mode === "certainty") out.sort(function (a, b) { return certRank(b[m.certKey]) - certRank(a[m.certKey]); });
   return out;
+}
+
+// Whether the day's batches are shown or just counted. Starts closed on every
+// load — the flat item list above is the one thing meant to be seen at a
+// glance — and opens only because someone tapped for it.
+var batchesOpen = false;
+
+// Every item carries `at` and, from fileItems on, `batch` — the id of the
+// queue entry that filed it. Grouping by batch turns the day's flat list back
+// into the submissions that built it: what came in together stays together,
+// newest submission first. An item from before `batch` existed falls back to
+// `at` (still one stamp per submission), and one from before either existed
+// becomes a batch of its own — never merged with a stranger just for sharing
+// no timestamp.
+function batchesOf(items) {
+  var map = {}, order = [];
+  items.forEach(function (it) {
+    var k = it.batch || it.at || it.id;
+    if (!map[k]) { map[k] = { at: it.at || "", items: [] }; order.push(k); }
+    map[k].items.push(it);
+  });
+  // order is oldest-first, matching storage; reversed here rather than at
+  // every call site, the same way the item list itself is reversed to read.
+  return order.map(function (k) { return map[k]; }).reverse();
+}
+
+// The moment a batch was submitted, read the way a clock is: hours and
+// minutes, local. An em dash for a batch with no stamp — an item logged
+// before `at` existed — rather than a fabricated time.
+function batchTime(at) {
+  var d = at ? new Date(at) : null;
+  return d && !isNaN(d) ? d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" }) : "—";
 }
 
 function showError(msg) {
@@ -1737,6 +1796,31 @@ function render() {
   }
 
   renderPending();
+
+  // batches — the same items, regrouped by submission. Hidden with nothing
+  // logged; closed by default even with something, since the flat list above
+  // already answers "what" and this answers "when" and "in what group",
+  // questions worth asking less often.
+  var batchList = batchesOf(items);
+  batchesSection.style.display = batchList.length ? "" : "none";
+  if (batchList.length) {
+    batchesLabel.textContent = batchList.length + (batchList.length === 1 ? " batch" : " batches");
+    batchesToggle.textContent = batchesOpen ? "hide" : "show";
+    batchesToggle.setAttribute("aria-expanded", String(batchesOpen));
+    batchesToggle.setAttribute("aria-label", (batchesOpen ? "Hide" : "Show") + " today's batches");
+    batchesEl.classList.toggle("open", batchesOpen);
+    batchesEl.innerHTML = "";
+    batchList.forEach(function (b) {
+      var left = el("span");
+      left.appendChild(el("span", "batch-time", batchTime(b.at)));
+      left.appendChild(el("span", "batch-count",
+        b.items.length + (b.items.length === 1 ? " item" : " items")));
+      var row = el("li", "batch-row");
+      row.appendChild(left);
+      row.appendChild(el("span", "batch-total", sumField(b.items, m.field) + " " + m.unit));
+      batchesEl.appendChild(row);
+    });
+  }
 
   // week chart
   weekEl.innerHTML = "";
@@ -2401,10 +2485,13 @@ function mark(id, patch, retryAt) {
 // late. Items from before this existed carry no stamp and stay where they are,
 // which is where they were logged.
 // This is also where an item becomes a record and gets the id the rest of the
-// app knows it by: everything upstream is still just the model's answer, and a
-// preview of one is not a thing anybody can edit or delete yet.
-function fileItems(list, items, at) {
-  items.forEach(function (it) { it.at = at; it.id = newId(); });
+// app knows it by, and the id of the entry that filed it — its batch — so the
+// items one submission produced can be found again without re-deriving the
+// grouping from a shared timestamp. Everything upstream is still just the
+// model's answer, and a preview of one is not a thing anybody can edit,
+// delete, or group yet.
+function fileItems(list, items, at, batch) {
+  items.forEach(function (it) { it.at = at; it.id = newId(); it.batch = batch; });
   var i = list.findIndex(function (x) { return x.at && x.at > at; });
   return i < 0 ? list.concat(items) : list.slice(0, i).concat(items, list.slice(i));
 }
@@ -2434,7 +2521,7 @@ async function send(e) {
     if (!failure) {
       if (!parsed.length) return mark(e.id, { error: "No food recognized — edit and retry.", parked: true });
       var days = loadDays();
-      days[e.date] = fileItems(days[e.date] || [], parsed, e.createdAt || "");
+      days[e.date] = fileItems(days[e.date] || [], parsed, e.createdAt || "", e.id);
       // Leave it queued rather than dropping a parse we already paid for.
       if (!saveDays(days)) return mark(e.id, { error: STORAGE_FAIL, parked: true });
       return removeEntry(e.id);
@@ -2600,6 +2687,11 @@ function saveSettings() {
 sortToggle.addEventListener("click", function () {
   var next = cycle(SORTS, loadSort());
   try { localStorage.setItem(KEY_SORT, next); } catch (e) {}
+  render();
+});
+
+batchesToggle.addEventListener("click", function () {
+  batchesOpen = !batchesOpen;
   render();
 });
 

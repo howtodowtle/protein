@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#ffffff">
-<meta name="description" content="Type what you ate in plain language, or photograph it, and get grams of protein and calories.">
+<meta name="description" content="Type what you ate in plain language, or photograph it, and get grams of protein — with calorie tracking as an option.">
 <title>Fuzzy Protein</title>
 <link rel="manifest" href="./manifest.webmanifest">
 <link rel="icon" type="image/png" href="./icon-192.png">
@@ -113,6 +113,8 @@
     font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em;
     color: #6b6b6b; margin-top: 12px;
   }
+  .check-row { display: flex; align-items: center; gap: 10px; font-size: 14px; }
+  .check-row input { width: 20px; height: 20px; flex: none; }
 
   .btn-solid {
     background: #111; color: #fff; border: none; font: inherit; font-weight: 700;
@@ -427,12 +429,23 @@
       <button id="api-key-save" class="btn-solid" type="button">Save</button>
     </div>
     <p id="settings-note"></p>
+
+    <h2>Calories</h2>
+    <div class="settings-row">
+      <label class="check-row">
+        <input id="calories-toggle" type="checkbox">
+        <span>Also track calories</span>
+      </label>
+    </div>
+    <p>Off by default, to keep each request small. Turn on for a calorie estimate
+      — and its own Protein / Calories screen — alongside protein on every item.</p>
+
     <!-- The deploy rewrites this line (.github/workflows/stamp.yml); "dev" means it never went through one. -->
     <p id="build-stamp">Build f8142c5 · 2026-08-16</p>
   </section>
 
   <section class="total-section">
-    <div class="metric-toggle" role="group" aria-label="Track protein or calories">
+    <div class="metric-toggle" id="metric-toggle" role="group" aria-label="Track protein or calories">
       <button id="metric-protein" class="metric-seg active" type="button">Protein</button>
       <button id="metric-calories" class="metric-seg" type="button">Calories</button>
     </div>
@@ -804,6 +817,7 @@ var KEY_PROVIDER = "protein.provider";
 var KEY_QUEUE = "protein.queue";
 var KEY_SORT = "protein.sort";
 var KEY_METRIC = "protein.metric";
+var KEY_CALORIES = "protein.calories";
 var STORAGE_FAIL = "Saving failed — storage unavailable.";
 
 // Per-provider settings live under "protein.<field>.<provider>". One exception:
@@ -889,6 +903,12 @@ var CERT_LABELS = { high: "sure", medium: "fairly sure", low: "not sure" };
 var CERTAINTY = Object.keys(CERT_LABELS);
 function certRank(v) { return CERTAINTY.indexOf(v) + 1; }
 
+// Calories are opt-in, off until turned on in settings: asking for a second
+// figure per item — its schema field, its own certainty, its share of every
+// rule and example in the prompt below — costs real output tokens on every
+// request, whether or not anyone ever reads the answer.
+function caloriesOn() { return localStorage.getItem(KEY_CALORIES) === "1"; }
+
 // The one model call returns two figures per item — protein and calories — and the
 // app shows one at a time. Everything downstream (total, list, certainty, sort, week
 // chart, history, the item editor) reads the active metric from here rather than
@@ -902,10 +922,12 @@ var METRICS = {
   protein:  { field: "protein",  unit: "g",    certKey: "certainty",        editLabel: "Grams of protein", goal: true },
   calories: { field: "calories", unit: "kcal", certKey: "calorieCertainty", editLabel: "Calories",         goal: false }
 };
-// Unknown or hand-edited value falls back to protein, the same way loadSort does.
+// Unknown or hand-edited value falls back to protein, the same way loadSort does —
+// and so does "calories" itself while the setting that feeds it is off, since
+// there is then nothing behind that screen worth showing.
 function loadMetric() {
   var v = localStorage.getItem(KEY_METRIC);
-  return METRICS[v] ? v : "protein";
+  return METRICS[v] && (v !== "calories" || caloriesOn()) ? v : "protein";
 }
 var viewMetric = loadMetric();
 
@@ -962,7 +984,83 @@ function dayLabel(key, long) {
 // the tails differ, and only the photo tails speak of a photo, so a text-only
 // request is byte-for-byte the request it was before photos existed — and a
 // model that was never handed one is never invited to imagine it.
-var PARSE_RULES = [
+//
+// Two complete rule sets, rather than one with calorie lines spliced in or out
+// at request time: the calorie half is woven through nearly every rule and
+// example below, not appended to them, so there is no clean seam to splice at.
+// PROTEIN_RULES is what this file always asked before calorie tracking
+// existed. CALORIE_RULES is that same request with the second figure — its
+// schema field, its own independent certainty, its share of every example —
+// threaded through. Which one goes out is decided by caloriesOn(): unread
+// calorie rules and examples are still-billed output tokens on every request.
+var PROTEIN_RULES = [
+  'You are a protein estimator. The input is a casual, fuzzy description of food someone ate,',
+  'in any language, with vague amounts allowed. Split it into items and estimate the grams of',
+  'protein in each, using realistic metric portions.',
+  '',
+  'Rules:',
+  '- Respond with ONLY a raw JSON array. No markdown fences, no prose, no text before or after.',
+  '- Schema: [{"name": string, "amount": string, "protein_g": number, "certainty": "high"|"medium"|"low"}]',
+  '- protein_g is a whole number >= 0 for the whole stated amount, not per unit.',
+  '- One object per food mentioned, in the order mentioned. Never merge items and never drop one:',
+  '  list near-zero foods (butter, oil, most vegetables) with protein_g 0.',
+  '- amount is short and concrete and states the metric weight you assumed, e.g. "3 slices, ~135 g".',
+  '- Resolve fuzzy units to typical portions: slice of bread ~45 g, spoon ~15 g, handful ~30 g,',
+  '  bowl ~250 g, glass ~200 ml, "a bit" / "a little" ~10 g.',
+  '- A gram figure is the weight of the food unless it is explicitly called protein',
+  '  (protein, Eiweiss, EW). A stated protein figure is useful evidence — often it is read off',
+  '  the packaging — so let it carry real weight, and multiply it out if it is per unit. But the',
+  '  answer is yours: never just pass a number through. Judge it against the food first.',
+  '- Sanity-check every number against what you know about that specific food. If a figure is not',
+  '  plausible for it, something was misread (often a weight taken for protein, or the user simply',
+  '  got it wrong) — go with your own estimate. Round to the nearest whole gram.',
+  '- Name the food the user named. Do not upgrade or specialise it: "1 Riegel mit 7 g Protein"',
+  '  is a "Riegel", not a "Proteinriegel".',
+  '- Keep names short and capitalized. Keep the local name for regional products (Bauernbrot, Magerquark).',
+  '- certainty is per item and says how much of that one figure you had to guess. Judge it on',
+  '  two things only: (a) is the quantity pinned down, (b) is the protein content of that food',
+  '  narrow or does it range widely. Both good -> "high". Neither -> "low". One but not the',
+  '  other -> "medium". Judge the input you were given, not how good your answer is:',
+  '    "4 eggs"                 -> high    counted, and an egg is an egg',
+  '    "a bowl of yoghurt"      -> medium  portion guessed, but yoghurt is yoghurt',
+  '    "50 g cheese"            -> medium  weighed, but cheese runs 10-35 g per 100 g',
+  '    "3 slices of camembert"  -> low     slice size unknown and camembert varies',
+  '  Two things make an item certain whatever its amount: a protein figure the user read off',
+  '  the packaging, and a food with essentially no protein (butter, oil) — both are "high".',
+  '',
+  'Example input: "4 fried eggs, 3 slices of Bauernbrot, a bit of butter, and 2 thin slices of camembert"',
+  'Example output:',
+  '[{"name":"Fried eggs","amount":"4 eggs, ~220 g","protein_g":25,"certainty":"high"},',
+  ' {"name":"Bauernbrot","amount":"3 slices, ~135 g","protein_g":10,"certainty":"medium"},',
+  ' {"name":"Butter","amount":"~10 g","protein_g":0,"certainty":"high"},',
+  ' {"name":"Camembert","amount":"2 thin slices, ~40 g","protein_g":8,"certainty":"low"}]',
+  '',
+  'Example input: "250 g joghurt + 200 g magerquark"',
+  'Example output:',
+  '[{"name":"Joghurt","amount":"250 g","protein_g":11,"certainty":"high"},',
+  ' {"name":"Magerquark","amount":"200 g","protein_g":19,"certainty":"high"}]',
+  '',
+  'Example input: "1 riegel mit 7.3 g protein"   (protein stated, so use it)',
+  'Example output:',
+  '[{"name":"Riegel","amount":"1 Riegel","protein_g":7,"certainty":"high"}]',
+  '',
+  'These four inputs all describe the same meal and must all give the same protein figure.',
+  'A slice of Bündnerfleisch weighs about 6 g and holds about 2.5 g of protein, so 4 slices',
+  'are ~24 g of meat and ~10 g of protein — whether the user states the weight, the protein,',
+  'or nothing at all. The figure is the same in all four; only how much was guessed differs,',
+  'which is exactly what certainty records:',
+  '  "4 scheiben bündnerfleisch"                        -> [{"name":"Bündnerfleisch","amount":"4 Scheiben, ~24 g","protein_g":10,"certainty":"medium"}]',
+  '  "4 scheiben bündnerfleisch zu je 6 g"              -> [{"name":"Bündnerfleisch","amount":"4 Scheiben, 24 g","protein_g":10,"certainty":"high"}]',
+  '  "4 scheiben bündnerfleisch mit je 2.5 g protein"   -> [{"name":"Bündnerfleisch","amount":"4 Scheiben, ~24 g","protein_g":10,"certainty":"high"}]',
+  '  "bündnerfleisch mit 10 g protein"                  -> [{"name":"Bündnerfleisch","amount":"~24 g","protein_g":10,"certainty":"high"}]',
+  '',
+  'Example input: "1 scheibe brot mit 40 g protein"   (impossible for one slice, so estimate it)',
+  'Example output:',
+  '[{"name":"Brot","amount":"1 Scheibe, ~45 g","protein_g":4,"certainty":"medium"}]',
+  ''
+].join("\n");
+
+var CALORIE_RULES = [
   'You are a protein and calorie estimator. The input is a casual, fuzzy description of food',
   'someone ate, in any language, with vague amounts allowed. Split it into items and estimate,',
   'for each, both the grams of protein and the calories (kcal), using realistic metric portions.',
@@ -1041,13 +1139,18 @@ var PARSE_RULES = [
   ''
 ].join("\n");
 
-var PARSE_PROMPT = PARSE_RULES + '\nNow do the same for this input: ';
+// Which rule set a request is built from — read fresh on every call, not
+// cached at load, so flipping the setting in settings takes effect on the
+// very next entry with no reload needed.
+function activeRules() { return caloriesOn() ? CALORIE_RULES : PROTEIN_RULES; }
+
+function parsePrompt() { return activeRules() + '\nNow do the same for this input: '; }
 
 // What changes when the input is a photograph. The schema does not: the same
 // array comes back, so everything downstream of the answer never learns how
 // the food was described. The closing line rides in the array with the rules it
 // closes, so the photo tail — like the typed one above — is written once.
-var PHOTO_PROMPT = PARSE_RULES + '\n' + [
+function photoPrompt() { return activeRules() + '\n' + [
   'A photo of the food is attached. Then:',
   '- The photo is the input. Give every distinct food visible its own row, exactly as if it',
   '  had been typed, and ignore plates, cutlery and everything else inedible.',
@@ -1058,7 +1161,7 @@ var PHOTO_PROMPT = PARSE_RULES + '\n' + [
   '  hidden in a bowl or under a sauce ranges wide — say so with "low".',
   '',
   'Now do the same for the food in this photo.'
-].join("\n");
+].join("\n"); }
 
 // The caption case is the photo case with the typed line named at the end, so it
 // extends that prompt rather than assembling a second copy of it. What the line
@@ -1066,13 +1169,13 @@ var PHOTO_PROMPT = PARSE_RULES + '\n' + [
 // photo, read out to a photo that came alone, describes something that is not
 // there — which is the same reason none of the photo rules above reach a
 // request that carries no photo.
-var PHOTO_TEXT_PROMPT = PHOTO_PROMPT + [
+function photoTextPrompt() { return photoPrompt() + [
   ' The words sent with it are context about the',
   'photo: they can name a food you cannot place, correct one, or state an amount, and a',
   'stated amount, weight or figure wins over what you read off the image.',
   '',
   'The user adds: '
-].join("\n");
+].join("\n"); }
 
 // Every failure says how it should be retried, decided here where the cause is
 // actually known rather than re-derived later from a status code:
@@ -1302,9 +1405,9 @@ async function parseFood(entry, onItems) {
                    typeof AbortController !== "undefined" && !!p.delta;
   // Which prompt depends on what there is to read: the typed line, the photo,
   // or the photo with the line as its caption.
-  var prompt = !image ? PARSE_PROMPT + JSON.stringify(text)
-    : text ? PHOTO_TEXT_PROMPT + JSON.stringify(text)
-    : PHOTO_PROMPT;
+  var prompt = !image ? parsePrompt() + JSON.stringify(text)
+    : text ? photoTextPrompt() + JSON.stringify(text)
+    : photoPrompt();
   var req = p.request(apiKey(id), modelFor(id), prompt, opts, wantStream, image);
 
   // Two clocks, and the request ends when either runs out.
@@ -1477,9 +1580,11 @@ var providerSelect = $("provider-select"), modelInput = $("model-input");
 var settingsNote = $("settings-note");
 var thinkingSelect = $("thinking-select"), effortInput = $("effort-input");
 var effortOptions = $("effort-options");
+var caloriesToggle = $("calories-toggle");
 var totalEl = $("total"), goalShow = $("goal-show"), goalEdit = $("goal-edit"), goalInput = $("goal-input");
 var barFill = $("bar-fill"), goalMsg = $("goal-msg");
 var goalArea = $("goal-area"), barTrack = $("bar-track");
+var metricToggleEl = $("metric-toggle");
 var metricProteinBtn = $("metric-protein"), metricCaloriesBtn = $("metric-calories");
 var foodInput = $("food-input"), logBtn = $("log-btn"), errorEl = $("error");
 var photoBtn = $("photo-btn"), photoInput = $("photo-input");
@@ -1533,6 +1638,10 @@ function showError(msg) {
 }
 
 function render() {
+  // If calorie tracking is off there is no second screen to be on — fall back
+  // without touching the stored choice, so turning it back on returns to
+  // whichever metric was last picked.
+  if (viewMetric === "calories" && !caloriesOn()) viewMetric = "protein";
   var m = METRICS[viewMetric];
   var days = loadDays();
   var goal = loadGoal();
@@ -1540,8 +1649,10 @@ function render() {
   var total = sumField(items, m.field);
   var hit = m.goal && total >= goal;
 
-  // metric switch: light the active segment, and show the goal block only for a
-  // metric that has a goal — calories are tracking-only for now.
+  // metric switch: shown only once there is a second metric to switch to, its
+  // active segment lit, and the goal block shown only for a metric that has a
+  // goal — calories are tracking-only for now.
+  metricToggleEl.style.display = caloriesOn() ? "" : "none";
   metricProteinBtn.classList.toggle("active", viewMetric === "protein");
   metricCaloriesBtn.classList.toggle("active", viewMetric === "calories");
   goalArea.style.display = m.goal ? "" : "none";
@@ -2435,6 +2546,7 @@ function syncSettings() {
     "Model and effort are sent verbatim, and only when set. " +
     (readsPhotos(id) ? "" : "Photos are text-only here: " + p.label + " takes no images. ") +
     (p.effortNote || "");
+  caloriesToggle.checked = caloriesOn();
 }
 
 function openSettings() {
@@ -2487,12 +2599,27 @@ sortToggle.addEventListener("click", function () {
 // reopens on the metric you left it on.
 function setMetric(id) {
   if (!METRICS[id] || id === viewMetric) return;
+  // Nothing behind the calorie screen while tracking is off — the toggle that
+  // reaches it is hidden too, but a stray call (or a stale click queued before
+  // the setting changed) should land the same way the hidden button would.
+  if (id === "calories" && !caloriesOn()) return;
   viewMetric = id;
   try { localStorage.setItem(KEY_METRIC, id); } catch (e) {}
   render();
 }
 metricProteinBtn.addEventListener("click", function () { setMetric("protein"); });
 metricCaloriesBtn.addEventListener("click", function () { setMetric("calories"); });
+
+// Takes effect immediately, like the metric toggle above — there is nothing
+// here worth gating behind the provider Save button, and the very next entry
+// should already reflect it either way.
+caloriesToggle.addEventListener("change", function () {
+  try {
+    if (caloriesToggle.checked) localStorage.setItem(KEY_CALORIES, "1");
+    else localStorage.removeItem(KEY_CALORIES);
+  } catch (e) {}
+  render();
+});
 
 goalShow.addEventListener("click", function () {
   goalInput.value = loadGoal();

@@ -718,7 +718,7 @@ const geminiStore = () => ({ "protein.provider": "gemini", "protein.apiKey.gemin
   {
     console.log("20. calorie view");
     const h = makeHarness({
-      store: { ...baseStore(), "protein.sort": "protein" },
+      store: { ...baseStore(), "protein.sort": "protein", "protein.calories": "1" },
       fetchImpl: async () => ok([
         // Oil: a sure 0 g protein but a low-certainty calorie guess — the two
         // certainties genuinely differ on the same item.
@@ -756,7 +756,7 @@ const geminiStore = () => ({ "protein.provider": "gemini", "protein.apiKey.gemin
   {
     console.log("21. per-metric edit isolation");
     const h = makeHarness({
-      store: baseStore(),
+      store: { ...baseStore(), "protein.calories": "1" },
       fetchImpl: async () => ok([{ name: "Eggs", amount: "4", protein_g: 25, certainty: "high", calories_kcal: 360, calorie_certainty: "high" }]),
     });
     h.els["food-input"].value = "4 eggs";
@@ -790,7 +790,7 @@ const geminiStore = () => ({ "protein.provider": "gemini", "protein.apiKey.gemin
   {
     console.log("22. calorie history");
     const h = makeHarness({
-      store: { ...baseStore(), "protein.goal": "40", "protein.metric": "calories" },
+      store: { ...baseStore(), "protein.goal": "40", "protein.metric": "calories", "protein.calories": "1" },
       fetchImpl: async () => ok([]),
     });
     // Seed through the app's own key for today, then re-render — the same date the
@@ -913,7 +913,7 @@ const geminiStore = () => ({ "protein.provider": "gemini", "protein.apiKey.gemin
     let sentBody = null;
     const g = gate();
     const h = makeHarness({
-      store: baseStore(),
+      store: { ...baseStore(), "protein.calories": "1" },
       fetchImpl: async (url, init) => {
         sentBody = JSON.parse(init.body);
         return sse([
@@ -1478,10 +1478,10 @@ const geminiStore = () => ({ "protein.provider": "gemini", "protein.apiKey.gemin
     await settle();
     const content = sentBody.messages[0].content;
     check("image block first, words after", Array.isArray(content) && content[0].source.media_type === "image/jpeg" && content[0].source.data === "AAAA", content);
-    check("photo prompt with the text as caption", content[1].text === h.ctx.PHOTO_TEXT_PROMPT + JSON.stringify("with ketchup"), content[1]);
+    check("photo prompt with the text as caption", content[1].text === h.ctx.photoTextPrompt() + JSON.stringify("with ketchup"), content[1]);
     // The caption case is the photo case plus what the caption is for — one
     // owner for the photo rules, and the extra rule only where it applies.
-    check("it is the photo prompt, extended", content[1].text.indexOf(h.ctx.PHOTO_PROMPT) === 0, content[1].text.slice(0, 40));
+    check("it is the photo prompt, extended", content[1].text.indexOf(h.ctx.photoPrompt()) === 0, content[1].text.slice(0, 40));
     check("and it says what the words are for", /words sent with it/i.test(content[1].text));
     check("item landed without the photo", only(h).protein === 25 && !("image" in only(h)), only(h));
     check("queue drained", q(h).length === 0, q(h));
@@ -1512,7 +1512,7 @@ const geminiStore = () => ({ "protein.provider": "gemini", "protein.apiKey.gemin
     check("wordless entry still reads as itself", pendPart(h, "pend-text")[0] === "Photo", pendPart(h, "pend-text"));
     check("estimating like any other", /estimating…/.test(pendMeta(h)[0]), pendMeta(h));
     const prompt = sentBody.messages[0].content[1].text;
-    check("photo-only prompt, nothing appended", prompt === h.ctx.PHOTO_PROMPT, sentBody.messages[0].content[1]);
+    check("photo-only prompt, nothing appended", prompt === h.ctx.photoPrompt(), sentBody.messages[0].content[1]);
     // The mirror of test 51's "no photo wording": a photo that came alone is
     // told nothing about words that came with it, because none did.
     check("no caption wording anywhere in it", !/words sent with it|user adds/i.test(prompt));
@@ -1535,7 +1535,7 @@ const geminiStore = () => ({ "protein.provider": "gemini", "protein.apiKey.gemin
     check("no image field stored", !("image" in q(h)[0]), q(h)[0]);
     await settle();
     const content = sentBody.messages[0].content;
-    check("content is the bare string it always was", content === h.ctx.PARSE_PROMPT + JSON.stringify("4 eggs"), typeof content);
+    check("content is the bare string it always was", content === h.ctx.parsePrompt() + JSON.stringify("4 eggs"), typeof content);
     check("no photo wording anywhere in it", !/photo/i.test(content));
   }
 
@@ -1555,7 +1555,7 @@ const geminiStore = () => ({ "protein.provider": "gemini", "protein.apiKey.gemin
     const parts = gBody.contents[0].parts;
     check("gemini: inlineData first, text after",
       parts.length === 2 && parts[0].inlineData.mimeType === "image/jpeg" &&
-      parts[0].inlineData.data === "CCCC" && parts[1].text === g1.ctx.PHOTO_PROMPT, parts);
+      parts[0].inlineData.data === "CCCC" && parts[1].text === g1.ctx.photoPrompt(), parts);
 
     // The same harness again with nothing attached: the one part it always sent.
     g1.els["food-input"].value = "reis";
@@ -1712,6 +1712,71 @@ const geminiStore = () => ({ "protein.provider": "gemini", "protein.apiKey.gemin
     h.els["settings-toggle"].click();
     check("settings warn before a photo is taken",
       /takes no images/.test(h.els["settings-note"].textContent), h.els["settings-note"].textContent);
+  }
+
+  // ---- 56. calories are off until turned on: no toggle, no calorie wording
+  //          or schema field in what gets sent, and a plain answer still lands
+  {
+    console.log("56. calories off by default");
+    const h = makeHarness({
+      store: baseStore(),
+      fetchImpl: async () => ok([{ name: "Eggs", amount: "4", protein_g: 25 }]),
+    });
+    check("off by default", h.ctx.caloriesOn() === false, h.store);
+    check("settings checkbox unchecked", h.els["calories-toggle"].checked === false, h.els["calories-toggle"].checked);
+    check("metric toggle hidden", h.els["metric-toggle"].style.display === "none", h.els["metric-toggle"].style.display);
+
+    const prompt = h.ctx.parsePrompt();
+    check("no calorie wording in the prompt", !/calorie/i.test(prompt), prompt);
+    const photo = h.ctx.photoPrompt();
+    check("none in the photo prompt either", !/calorie/i.test(photo), photo);
+
+    h.els["food-input"].value = "4 eggs";
+    h.els["log-btn"].click();
+    await settle();
+    check("item lands with 0 calories, unrated", only(h).calories === 0 && only(h).calorieCertainty === "", only(h));
+  }
+
+  // ---- 57. turning calories on in settings takes effect immediately: it
+  //          persists, the toggle appears, and the very next request already
+  //          asks for calories — no reload needed
+  {
+    console.log("57. turning calories on");
+    const h = makeHarness({
+      store: baseStore(),
+      fetchImpl: async () => ok([{ name: "Eggs", amount: "4", protein_g: 25, certainty: "high", calories_kcal: 360, calorie_certainty: "high" }]),
+    });
+    h.els["calories-toggle"].checked = true;
+    h.els["calories-toggle"].listeners.change[0]();
+    check("persisted", h.store["protein.calories"] === "1", h.store);
+    check("metric toggle now shown", h.els["metric-toggle"].style.display !== "none", h.els["metric-toggle"].style.display);
+    check("the calorie screen is now reachable", (h.ctx.setMetric("calories"), h.ctx.viewMetric) === "calories", h.ctx.viewMetric);
+
+    const prompt = h.ctx.parsePrompt();
+    check("calorie schema now requested", /calories_kcal/.test(prompt), prompt.slice(-40));
+
+    h.els["food-input"].value = "4 eggs";
+    h.els["log-btn"].click();
+    await settle();
+    check("calories parsed once asked for", only(h).calories === 360, only(h));
+  }
+
+  // ---- 58. turning calories back off snaps the view back to protein, and the
+  //          toggle that reached the calorie screen disappears with it
+  {
+    console.log("58. turning calories off");
+    const h = makeHarness({
+      store: { ...baseStore(), "protein.calories": "1", "protein.metric": "calories" },
+      fetchImpl: async () => ok([]),
+    });
+    check("starts on calories", h.ctx.viewMetric === "calories", h.ctx.viewMetric);
+    h.els["calories-toggle"].checked = false;
+    h.els["calories-toggle"].listeners.change[0]();
+    check("no longer persisted", !("protein.calories" in h.store), h.store);
+    check("view snapped back to protein", h.ctx.viewMetric === "protein", h.ctx.viewMetric);
+    check("metric toggle hidden again", h.els["metric-toggle"].style.display === "none", h.els["metric-toggle"].style.display);
+    check("clicking the hidden toggle cannot reach it either",
+      (h.ctx.setMetric("calories"), h.ctx.viewMetric) === "protein", h.ctx.viewMetric);
   }
 
   console.log("\n" + pass + " passed, " + fail + " failed");

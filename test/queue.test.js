@@ -223,6 +223,9 @@ const baseStore = () => ({ "protein.apiKey": "sk-test", "protein.provider": "ant
 const dsStore = () => ({ "protein.provider": "deepseek", "protein.apiKey.deepseek": "sk-ds" });
 const kimiStore = () => ({ "protein.provider": "kimi", "protein.apiKey.kimi": "sk-km" });
 const geminiStore = () => ({ "protein.provider": "gemini", "protein.apiKey.gemini": "AIza-test" });
+// The base store with calorie tracking turned on, for the tests that exercise
+// the calorie screen — off by default, so those tests opt in explicitly.
+const caloriesStore = () => ({ ...baseStore(), "protein.calories": "1" });
 
 (async () => {
   // ---- 1. happy path: enqueue -> drain -> lands in days, queue empty
@@ -718,7 +721,7 @@ const geminiStore = () => ({ "protein.provider": "gemini", "protein.apiKey.gemin
   {
     console.log("20. calorie view");
     const h = makeHarness({
-      store: { ...baseStore(), "protein.sort": "protein", "protein.calories": "1" },
+      store: { ...caloriesStore(), "protein.sort": "protein" },
       fetchImpl: async () => ok([
         // Oil: a sure 0 g protein but a low-certainty calorie guess — the two
         // certainties genuinely differ on the same item.
@@ -756,7 +759,7 @@ const geminiStore = () => ({ "protein.provider": "gemini", "protein.apiKey.gemin
   {
     console.log("21. per-metric edit isolation");
     const h = makeHarness({
-      store: { ...baseStore(), "protein.calories": "1" },
+      store: caloriesStore(),
       fetchImpl: async () => ok([{ name: "Eggs", amount: "4", protein_g: 25, certainty: "high", calories_kcal: 360, calorie_certainty: "high" }]),
     });
     h.els["food-input"].value = "4 eggs";
@@ -790,7 +793,7 @@ const geminiStore = () => ({ "protein.provider": "gemini", "protein.apiKey.gemin
   {
     console.log("22. calorie history");
     const h = makeHarness({
-      store: { ...baseStore(), "protein.goal": "40", "protein.metric": "calories", "protein.calories": "1" },
+      store: { ...caloriesStore(), "protein.goal": "40", "protein.metric": "calories" },
       fetchImpl: async () => ok([]),
     });
     // Seed through the app's own key for today, then re-render — the same date the
@@ -913,7 +916,7 @@ const geminiStore = () => ({ "protein.provider": "gemini", "protein.apiKey.gemin
     let sentBody = null;
     const g = gate();
     const h = makeHarness({
-      store: { ...baseStore(), "protein.calories": "1" },
+      store: caloriesStore(),
       fetchImpl: async (url, init) => {
         sentBody = JSON.parse(init.body);
         return sse([
@@ -1750,7 +1753,8 @@ const geminiStore = () => ({ "protein.provider": "gemini", "protein.apiKey.gemin
     h.els["calories-toggle"].listeners.change[0]();
     check("persisted", h.store["protein.calories"] === "1", h.store);
     check("metric toggle now shown", h.els["metric-toggle"].style.display !== "none", h.els["metric-toggle"].style.display);
-    check("the calorie screen is now reachable", (h.ctx.setMetric("calories"), h.ctx.viewMetric) === "calories", h.ctx.viewMetric);
+    h.ctx.setMetric("calories");
+    check("the calorie screen is now reachable", h.ctx.viewMetric === "calories", h.ctx.viewMetric);
 
     const prompt = h.ctx.parsePrompt();
     check("calorie schema now requested", /calories_kcal/.test(prompt), prompt.slice(-40));
@@ -1766,7 +1770,7 @@ const geminiStore = () => ({ "protein.provider": "gemini", "protein.apiKey.gemin
   {
     console.log("58. turning calories off");
     const h = makeHarness({
-      store: { ...baseStore(), "protein.calories": "1", "protein.metric": "calories" },
+      store: { ...caloriesStore(), "protein.metric": "calories" },
       fetchImpl: async () => ok([]),
     });
     check("starts on calories", h.ctx.viewMetric === "calories", h.ctx.viewMetric);
@@ -1775,8 +1779,8 @@ const geminiStore = () => ({ "protein.provider": "gemini", "protein.apiKey.gemin
     check("no longer persisted", !("protein.calories" in h.store), h.store);
     check("view snapped back to protein", h.ctx.viewMetric === "protein", h.ctx.viewMetric);
     check("metric toggle hidden again", h.els["metric-toggle"].style.display === "none", h.els["metric-toggle"].style.display);
-    check("clicking the hidden toggle cannot reach it either",
-      (h.ctx.setMetric("calories"), h.ctx.viewMetric) === "protein", h.ctx.viewMetric);
+    h.ctx.setMetric("calories");
+    check("clicking the hidden toggle cannot reach it either", h.ctx.viewMetric === "protein", h.ctx.viewMetric);
   }
 
   console.log("\n" + pass + " passed, " + fail + " failed");

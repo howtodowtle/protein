@@ -842,10 +842,12 @@ function saveJSON(key, value) {
   try { localStorage.setItem(key, JSON.stringify(value)); return true; }
   catch (e) { return false; }
 }
-// An empty settings field means "no override" — drop the key rather than store "".
-function setOrClear(field, id, value) {
-  if (value) localStorage.setItem(storageKey(field, id), value);
-  else localStorage.removeItem(storageKey(field, id));
+// An empty value means "no override" — drop the key rather than store "".
+// Takes the storage key itself rather than a (field, id) pair, so it serves a
+// flat key (KEY_CALORIES) exactly as well as a per-provider one (storageKey(...)).
+function setOrClear(key, value) {
+  if (value) localStorage.setItem(key, value);
+  else localStorage.removeItem(key);
 }
 
 function provider() {
@@ -915,22 +917,26 @@ function caloriesOn() { return localStorage.getItem(KEY_CALORIES) === "1"; }
 // The one model call returns two figures per item — protein and calories — and the
 // app shows one at a time. Everything downstream (total, list, certainty, sort, week
 // chart, history, the item editor) reads the active metric from here rather than
-// naming a field, so the calorie screen reuses the protein machinery whole. The lone
-// asymmetry is the goal: protein has one; calories, for now, is tracking-only.
+// naming a field, so the calorie screen reuses the protein machinery whole.
 //   field     — the per-item number this metric sums and shows
 //   certKey   — the per-item certainty word for that figure
 //   editLabel — the aria-label for that number's field in the item editor
 //   goal      — whether this metric has a target (and so a goal bar and goal line)
+//   enabled   — whether this metric can be shown at all right now; absent means
+//               always. Calories are opt-in, so this reads the live setting
+//               rather than a value baked in at load, the same way activeRules()
+//               below reads it fresh on every prompt.
 var METRICS = {
   protein:  { field: "protein",  unit: "g",    certKey: "certainty",        editLabel: "Grams of protein", goal: true },
-  calories: { field: "calories", unit: "kcal", certKey: "calorieCertainty", editLabel: "Calories",         goal: false }
+  calories: { field: "calories", unit: "kcal", certKey: "calorieCertainty", editLabel: "Calories",         goal: false, enabled: caloriesOn }
 };
+function metricEnabled(id) { var m = METRICS[id]; return !!m && (!m.enabled || m.enabled()); }
 // Unknown or hand-edited value falls back to protein, the same way loadSort does —
-// and so does "calories" itself while the setting that feeds it is off, since
-// there is then nothing behind that screen worth showing.
+// and so does a disabled metric, since there is then nothing behind that screen
+// worth showing.
 function loadMetric() {
   var v = localStorage.getItem(KEY_METRIC);
-  return METRICS[v] && (v !== "calories" || caloriesOn()) ? v : "protein";
+  return metricEnabled(v) ? v : "protein";
 }
 var viewMetric = loadMetric();
 
@@ -996,6 +1002,23 @@ function dayLabel(key, long) {
 // schema field, its own independent certainty, its share of every example —
 // threaded through. Which one goes out is decided by caloriesOn(): unread
 // calorie rules and examples are still-billed output tokens on every request.
+// The certainty rule — the guessing heuristic, its four worked examples, and
+// the one sentence on what makes a figure certain regardless of amount — is
+// judged the same way whether or not calories are being asked for, so both
+// rule sets below share this paragraph rather than each carrying their own copy.
+var CERTAINTY_RULES = [
+  '- certainty is per item and says how much of that one figure you had to guess. Judge it on',
+  '  two things only: (a) is the quantity pinned down, (b) is the protein content of that food',
+  '  narrow or does it range widely. Both good -> "high". Neither -> "low". One but not the',
+  '  other -> "medium". Judge the input you were given, not how good your answer is:',
+  '    "4 eggs"                 -> high    counted, and an egg is an egg',
+  '    "a bowl of yoghurt"      -> medium  portion guessed, but yoghurt is yoghurt',
+  '    "50 g cheese"            -> medium  weighed, but cheese runs 10-35 g per 100 g',
+  '    "3 slices of camembert"  -> low     slice size unknown and camembert varies',
+  '  Two things make an item certain whatever its amount: a protein figure the user read off',
+  '  the packaging, and a food with essentially no protein (butter, oil) — both are "high".'
+];
+
 var PROTEIN_RULES = [
   'You are a protein estimator. The input is a casual, fuzzy description of food someone ate,',
   'in any language, with vague amounts allowed. Split it into items and estimate the grams of',
@@ -1019,17 +1042,8 @@ var PROTEIN_RULES = [
   '  got it wrong) — go with your own estimate. Round to the nearest whole gram.',
   '- Name the food the user named. Do not upgrade or specialise it: "1 Riegel mit 7 g Protein"',
   '  is a "Riegel", not a "Proteinriegel".',
-  '- Keep names short and capitalized. Keep the local name for regional products (Bauernbrot, Magerquark).',
-  '- certainty is per item and says how much of that one figure you had to guess. Judge it on',
-  '  two things only: (a) is the quantity pinned down, (b) is the protein content of that food',
-  '  narrow or does it range widely. Both good -> "high". Neither -> "low". One but not the',
-  '  other -> "medium". Judge the input you were given, not how good your answer is:',
-  '    "4 eggs"                 -> high    counted, and an egg is an egg',
-  '    "a bowl of yoghurt"      -> medium  portion guessed, but yoghurt is yoghurt',
-  '    "50 g cheese"            -> medium  weighed, but cheese runs 10-35 g per 100 g',
-  '    "3 slices of camembert"  -> low     slice size unknown and camembert varies',
-  '  Two things make an item certain whatever its amount: a protein figure the user read off',
-  '  the packaging, and a food with essentially no protein (butter, oil) — both are "high".',
+  '- Keep names short and capitalized. Keep the local name for regional products (Bauernbrot, Magerquark).'
+].concat(CERTAINTY_RULES).concat([
   '',
   'Example input: "4 fried eggs, 3 slices of Bauernbrot, a bit of butter, and 2 thin slices of camembert"',
   'Example output:',
@@ -1061,7 +1075,7 @@ var PROTEIN_RULES = [
   'Example output:',
   '[{"name":"Brot","amount":"1 Scheibe, ~45 g","protein_g":4,"certainty":"medium"}]',
   ''
-].join("\n");
+]).join("\n");
 
 var CALORIE_RULES = [
   'You are a protein and calorie estimator. The input is a casual, fuzzy description of food',
@@ -1091,17 +1105,8 @@ var CALORIE_RULES = [
   '  got it wrong) — go with your own estimate. Round to the nearest whole gram and whole kcal.',
   '- Name the food the user named. Do not upgrade or specialise it: "1 Riegel mit 7 g Protein"',
   '  is a "Riegel", not a "Proteinriegel".',
-  '- Keep names short and capitalized. Keep the local name for regional products (Bauernbrot, Magerquark).',
-  '- certainty is per item and says how much of that one figure you had to guess. Judge it on',
-  '  two things only: (a) is the quantity pinned down, (b) is the protein content of that food',
-  '  narrow or does it range widely. Both good -> "high". Neither -> "low". One but not the',
-  '  other -> "medium". Judge the input you were given, not how good your answer is:',
-  '    "4 eggs"                 -> high    counted, and an egg is an egg',
-  '    "a bowl of yoghurt"      -> medium  portion guessed, but yoghurt is yoghurt',
-  '    "50 g cheese"            -> medium  weighed, but cheese runs 10-35 g per 100 g',
-  '    "3 slices of camembert"  -> low     slice size unknown and camembert varies',
-  '  Two things make an item certain whatever its amount: a protein figure the user read off',
-  '  the packaging, and a food with essentially no protein (butter, oil) — both are "high".',
+  '- Keep names short and capitalized. Keep the local name for regional products (Bauernbrot, Magerquark).'
+].concat(CERTAINTY_RULES).concat([
   '- calorie_certainty is the same judgement for calories_kcal, made independently: (a) is the',
   '  quantity pinned down, (b) is the calorie density of that food narrow or does it range widely.',
   '  It often differs from certainty for the very same item: a splash of oil is a sure 0 g protein',
@@ -1140,7 +1145,7 @@ var CALORIE_RULES = [
   'Example output:',
   '[{"name":"Brot","amount":"1 Scheibe, ~45 g","protein_g":4,"certainty":"medium","calories_kcal":115,"calorie_certainty":"medium"}]',
   ''
-].join("\n");
+]).join("\n");
 
 // Which rule set a request is built from — read fresh on every call, not
 // cached at load, so flipping the setting in settings takes effect on the
@@ -1641,10 +1646,10 @@ function showError(msg) {
 }
 
 function render() {
-  // If calorie tracking is off there is no second screen to be on — fall back
-  // without touching the stored choice, so turning it back on returns to
-  // whichever metric was last picked.
-  if (viewMetric === "calories" && !caloriesOn()) viewMetric = "protein";
+  // If the metric on screen just became disabled, there is no second screen
+  // to be on — fall back without touching the stored choice, so turning it
+  // back on returns to whichever metric was last picked.
+  if (!metricEnabled(viewMetric)) viewMetric = "protein";
   var m = METRICS[viewMetric];
   var days = loadDays();
   var goal = loadGoal();
@@ -1655,7 +1660,7 @@ function render() {
   // metric switch: shown only once there is a second metric to switch to, its
   // active segment lit, and the goal block shown only for a metric that has a
   // goal — calories are tracking-only for now.
-  metricToggleEl.style.display = caloriesOn() ? "" : "none";
+  metricToggleEl.style.display = metricEnabled("calories") ? "" : "none";
   metricProteinBtn.classList.toggle("active", viewMetric === "protein");
   metricCaloriesBtn.classList.toggle("active", viewMetric === "calories");
   goalArea.style.display = m.goal ? "" : "none";
@@ -2581,9 +2586,9 @@ function saveSettings() {
   try {
     localStorage.setItem(KEY_PROVIDER, id);
     if (key) localStorage.setItem(storageKey("apiKey", id), key);
-    setOrClear("model", id, model);
-    setOrClear("thinking", id, thinking);
-    setOrClear("effort", id, effort);
+    setOrClear(storageKey("model", id), model);
+    setOrClear(storageKey("thinking", id), thinking);
+    setOrClear(storageKey("effort", id), effort);
   } catch (e) {}
   if (!apiKey(id)) { keyInput.focus(); showError("Add your API key first."); return; }
   settingsEl.classList.remove("open");
@@ -2601,11 +2606,11 @@ sortToggle.addEventListener("click", function () {
 // Switch which figure the whole screen shows. The choice is remembered, so the app
 // reopens on the metric you left it on.
 function setMetric(id) {
-  if (!METRICS[id] || id === viewMetric) return;
-  // Nothing behind the calorie screen while tracking is off — the toggle that
-  // reaches it is hidden too, but a stray call (or a stale click queued before
-  // the setting changed) should land the same way the hidden button would.
-  if (id === "calories" && !caloriesOn()) return;
+  if (id === viewMetric) return;
+  // A disabled metric's toggle button is hidden too, but a stray call (or a
+  // stale click queued before the setting changed) should land the same way
+  // the hidden button would.
+  if (!metricEnabled(id)) return;
   viewMetric = id;
   try { localStorage.setItem(KEY_METRIC, id); } catch (e) {}
   render();
@@ -2617,10 +2622,7 @@ metricCaloriesBtn.addEventListener("click", function () { setMetric("calories");
 // here worth gating behind the provider Save button, and the very next entry
 // should already reflect it either way.
 caloriesToggle.addEventListener("change", function () {
-  try {
-    if (caloriesToggle.checked) localStorage.setItem(KEY_CALORIES, "1");
-    else localStorage.removeItem(KEY_CALORIES);
-  } catch (e) {}
+  try { setOrClear(KEY_CALORIES, caloriesToggle.checked ? "1" : ""); } catch (e) {}
   render();
 });
 

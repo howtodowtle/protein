@@ -1783,6 +1783,95 @@ const caloriesStore = () => ({ ...baseStore(), "protein.calories": "1" });
     check("clicking the hidden toggle cannot reach it either", h.ctx.viewMetric === "protein", h.ctx.viewMetric);
   }
 
+  // ---- 59. batches — items regrouped by the submission that filed them
+  {
+    console.log("59. batches");
+    const replies = [
+      [{ name: "Eggs", amount: "4", protein_g: 25 }],
+      [{ name: "Quark", amount: "200 g", protein_g: 19 }, { name: "Bread", amount: "2 slices", protein_g: 8 }],
+    ];
+    let call = 0;
+    const h = makeHarness({ store: baseStore(), fetchImpl: async () => ok(replies[call++]) });
+
+    check("hidden with nothing logged", h.els["batches-section"].style.display === "none", h.els["batches-section"].style.display);
+
+    h.els["food-input"].value = "4 eggs";
+    h.els["log-btn"].click();
+    await settle();
+    h.els["food-input"].value = "quark and bread";
+    h.els["log-btn"].click();
+    await settle();
+
+    check("shown once something is logged", h.els["batches-section"].style.display !== "none", h.els["batches-section"].style.display);
+    check("counted", h.els["batches-label"].textContent === "2 batches", h.els["batches-label"].textContent);
+    check("closed by default", !h.els["batches"].classList.contains("open"), h.els["batches"].className);
+    check("toggle offers to show", h.els["batches-toggle"].textContent === "show", h.els["batches-toggle"].textContent);
+
+    h.els["batches-toggle"].click();
+    check("opens on tap", h.els["batches"].classList.contains("open"), h.els["batches"].className);
+    check("toggle now offers to hide", h.els["batches-toggle"].textContent === "hide", h.els["batches-toggle"].textContent);
+
+    // Two submissions, newest first, each totalled from its own items only —
+    // not the day's running total.
+    const rows = h.els["batches"].children;
+    check("one row per submission", rows.length === 2, rows.length);
+    check("newest submission first, its own total", rows[0].children[1].textContent === "27 g", rows[0].children[1].textContent);
+    check("count reads the batch's own items", rows[0].children[0].children[1].textContent === "2 items", rows[0].children[0].children[1].textContent);
+    check("older submission second", rows[1].children[1].textContent === "25 g", rows[1].children[1].textContent);
+    check("single-item batch reads singular", rows[1].children[0].children[1].textContent === "1 item", rows[1].children[0].children[1].textContent);
+
+    h.els["batches-toggle"].click();
+    check("closes again", !h.els["batches"].classList.contains("open"), h.els["batches"].className);
+  }
+
+  // ---- 60. a batch's time is when it was queued, not when the model answered
+  {
+    console.log("60. batch time is submission time");
+    const g = gate();
+    const h = makeHarness({
+      store: baseStore(),
+      fetchImpl: async () => { await g.held; return ok([{ name: "Eggs", amount: "4", protein_g: 25 }]); },
+    });
+    h.els["food-input"].value = "4 eggs";
+    h.els["log-btn"].click();
+    const queuedAt = q(h)[0].createdAt, queuedId = q(h)[0].id;
+    g.release();       // the answer arrives well after the submission was queued
+    await settle();
+
+    const item = only(h);
+    check("item stamped with the queued moment, not the answer's", item.at === queuedAt, [item.at, queuedAt]);
+    check("item's batch is the entry that filed it", item.batch === queuedId, [item.batch, queuedId]);
+  }
+
+  // ---- 61. legacy items group by whatever stamp they carry, or stand alone
+  {
+    console.log("61. batches: legacy data");
+    const legacyDay = "2020-01-01";
+    const h = makeHarness({
+      store: {
+        ...baseStore(),
+        "protein.days": JSON.stringify({
+          [legacyDay]: [
+            // Before `batch` existed: two items sharing the `at` stamp their
+            // (pre-batch) submission left them — still one batch.
+            { id: "a", name: "Rice", amount: "100 g", protein: 3, at: "2020-01-01T08:00:00.000Z" },
+            { id: "b", name: "Beans", amount: "100 g", protein: 8, at: "2020-01-01T08:00:00.000Z" },
+            // Before `at` existed at all: no shared stamp, so no grouping to infer.
+            { id: "c", name: "Toast", amount: "1 slice", protein: 4 },
+          ],
+        }),
+      },
+      fetchImpl: async () => ok([]),
+    });
+    const grouped = h.ctx.batchesOf(days(h)[legacyDay]);
+    check("shared `at` groups into one batch", grouped.length === 2, grouped.map((b) => b.items.length));
+    check("the grouped batch holds both items",
+      grouped.some((b) => b.items.length === 2 && b.items.map((i) => i.name).sort().join() === "Beans,Rice"),
+      grouped);
+    check("the stampless item stands alone",
+      grouped.some((b) => b.items.length === 1 && b.items[0].name === "Toast"), grouped);
+  }
+
   console.log("\n" + pass + " passed, " + fail + " failed");
   process.exit(fail ? 1 : 0);
 })();

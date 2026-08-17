@@ -306,7 +306,12 @@
   /* Batches — the day's items regrouped by the submission that filed them,
      closed by default so the flat list above stays the one thing on screen
      that matters at a glance. Each row states what that list cannot: when the
-     food was actually logged, not when the model got back to it. */
+     food was actually logged, not when the model got back to it. The row's
+     own text — when, how many, how much — wears the same three classes the
+     history day-list already defined (.hist-day-when/-count/-total): same
+     job, same look, so it is styled once rather than twice. Only the row
+     itself is new: a plain, non-interactive line, not the button history's
+     rows are. */
   .batches-section { margin-top: 24px; }
   .batches-head { padding-top: 12px; }
   #batches { list-style: none; margin-top: 4px; display: none; }
@@ -315,9 +320,6 @@
     display: flex; align-items: baseline; justify-content: space-between;
     gap: 12px; padding: 10px 0; border-bottom: 0.5px dotted #dcdcdc;
   }
-  .batch-time { font-weight: 700; }
-  .batch-count { margin-left: 8px; font-size: 13px; color: #6b6b6b; }
-  .batch-total { font-weight: 900; font-variant-numeric: tabular-nums; flex-shrink: 0; }
 
   /* Week chart */
   .week-section { margin-top: 32px; }
@@ -1667,11 +1669,6 @@ function sortItems(items, mode, m) {
   return out;
 }
 
-// Whether the day's batches are shown or just counted. Starts closed on every
-// load — the flat item list above is the one thing meant to be seen at a
-// glance — and opens only because someone tapped for it.
-var batchesOpen = false;
-
 // Every item carries `at` and, from fileItems on, `batch` — the id of the
 // queue entry that filed it. Grouping by batch turns the day's flat list back
 // into the submissions that built it: what came in together stays together,
@@ -1695,8 +1692,41 @@ function batchesOf(items) {
 // minutes, local. An em dash for a batch with no stamp — an item logged
 // before `at` existed — rather than a fabricated time.
 function batchTime(at) {
-  var d = at ? new Date(at) : null;
-  return d && !isNaN(d) ? d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" }) : "—";
+  return at ? new Date(at).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" }) : "—";
+}
+
+// items and m are optional: render() passes what it already loaded, the
+// toggle click below reads its own — same convention as renderHistory.
+// Hidden with nothing logged; closed by default even with something, since
+// the flat list above already answers "what" and this answers "when" and "in
+// what group", questions worth asking less often. Open/closed lives on the
+// list's own class, the same source of truth the settings panel uses, rather
+// than a second JS flag kept in step with it — and the rows are only built
+// while that class says they are visible, so a background render (a queue
+// drain, a timer) spends no DOM work on a list nobody can see.
+function renderBatches(items, m) {
+  if (!items) items = loadDays()[todayKey()] || [];
+  if (!m) m = METRICS[viewMetric];
+  var batchList = batchesOf(items);
+  batchesSection.style.display = batchList.length ? "" : "none";
+  if (!batchList.length) return;
+  batchesLabel.textContent = batchList.length + (batchList.length === 1 ? " batch" : " batches");
+  var open = batchesEl.classList.contains("open");
+  batchesToggle.textContent = open ? "hide" : "show";
+  batchesToggle.setAttribute("aria-expanded", String(open));
+  batchesToggle.setAttribute("aria-label", (open ? "Hide" : "Show") + " today's batches");
+  if (!open) return;
+  batchesEl.innerHTML = "";
+  batchList.forEach(function (b) {
+    var left = el("span", "hist-day-left");
+    left.appendChild(el("span", "hist-day-when", batchTime(b.at)));
+    left.appendChild(el("span", "hist-day-count",
+      b.items.length + (b.items.length === 1 ? " item" : " items")));
+    var row = el("li", "batch-row");
+    row.appendChild(left);
+    row.appendChild(el("span", "hist-day-total", sumField(b.items, m.field) + " " + m.unit));
+    batchesEl.appendChild(row);
+  });
 }
 
 function showError(msg) {
@@ -1797,30 +1827,7 @@ function render() {
 
   renderPending();
 
-  // batches — the same items, regrouped by submission. Hidden with nothing
-  // logged; closed by default even with something, since the flat list above
-  // already answers "what" and this answers "when" and "in what group",
-  // questions worth asking less often.
-  var batchList = batchesOf(items);
-  batchesSection.style.display = batchList.length ? "" : "none";
-  if (batchList.length) {
-    batchesLabel.textContent = batchList.length + (batchList.length === 1 ? " batch" : " batches");
-    batchesToggle.textContent = batchesOpen ? "hide" : "show";
-    batchesToggle.setAttribute("aria-expanded", String(batchesOpen));
-    batchesToggle.setAttribute("aria-label", (batchesOpen ? "Hide" : "Show") + " today's batches");
-    batchesEl.classList.toggle("open", batchesOpen);
-    batchesEl.innerHTML = "";
-    batchList.forEach(function (b) {
-      var left = el("span");
-      left.appendChild(el("span", "batch-time", batchTime(b.at)));
-      left.appendChild(el("span", "batch-count",
-        b.items.length + (b.items.length === 1 ? " item" : " items")));
-      var row = el("li", "batch-row");
-      row.appendChild(left);
-      row.appendChild(el("span", "batch-total", sumField(b.items, m.field) + " " + m.unit));
-      batchesEl.appendChild(row);
-    });
-  }
+  renderBatches(items, m);
 
   // week chart
   weekEl.innerHTML = "";
@@ -2691,8 +2698,8 @@ sortToggle.addEventListener("click", function () {
 });
 
 batchesToggle.addEventListener("click", function () {
-  batchesOpen = !batchesOpen;
-  render();
+  batchesEl.classList.toggle("open", !batchesEl.classList.contains("open"));
+  renderBatches();
 });
 
 // Switch which figure the whole screen shows. The choice is remembered, so the app

@@ -89,6 +89,9 @@
   #settings { margin-top: 16px; border: 2px solid #111; padding: 14px; display: none; }
   #settings.open { display: block; }
   #settings h2 { font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.1em; }
+  /* The first h2 (Provider) sits flush under the box's own padding; any later
+     one is a new section and needs air between it and what came before. */
+  #settings h2:not(:first-child) { margin-top: 20px; }
   #settings p { font-size: 13px; color: #6b6b6b; margin-top: 6px; line-height: 1.4; }
   .settings-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
   /* Two fields sit side by side until the phone is too narrow for both to be
